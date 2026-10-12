@@ -591,11 +591,12 @@ ESPORT_DEFAULTS = {
     "bet_enabled": False,
     # 猜中加几分。免费玩、下注不消耗，所以这只是个荣誉分。
     "bet_points_per_hit": 1,
-    # 封盘线 = 登记开赛时刻 + grace(赛制) − 这个分钟数。
-    # 锚在 grace（= 机器人自己开始抓结果的时刻）往前退，**绝不允许下注窗口越过
-    # 机器人知情的时刻**；15 分钟同时是「最后一个下注」与「最早可能的结算读取」
-    # 之间的结构缓冲（BET_PLAY.md §3.2 / §3.5）。
-    "bet_close_before_grace_minutes": 15,
+    # 封盘线 = 登记开赛时刻(est) − 这个分钟数。**v2 规则（2026-10-12 用户要求）**：
+    # 下注窗口 = 今日总预告发布（09:30 登记）→ 开赛前封盘，各赛制一致。
+    # 旧规则（est + grace − 15 分，赛中封盘）的问题是赛中竞猜信息不对称
+    # （群里观众看着比分下注），且 Bo5 打三小时；改成开赛前封盘后这两个问题
+    # 一起消失（BET_PLAY.md §3 v2）。
+    "bet_close_before_start_minutes": 10,
     # /bet 的冷却。⚠️ 它是全项目第一个**按用户**维度的冷却（键 = 群号|bet|uid），
     # 不是 cmd_cooldown_seconds 那种全群维度 —— 全群冷却会把别人在窗内的下注
     # 静默吞掉。值也独立：/bet 零网络，用不上 30 秒的风控预算，且下注是连续动作
@@ -2736,6 +2737,11 @@ def note_pending(picked, now, es, path=RESULTS_STATE_FILE):
                 "bo": m.get("bo") or "",
                 "status": "pending",
                 "noted_at": now.strftime("%Y-%m-%d %H:%M:%S"),
+                # 登记时刻（数值型，秒）—— **/bet 的开放锚点**（v2 规则）：
+                # 今日总预告发布（09:30 这一轮 note_pending）即开放下注，
+                # 不再等到开赛时刻（BET_PLAY.md §3.1）。旧条目没有这个字段，
+                # 读取时缺省当 0 = 「早已登记、默认开放」（见 bet_round_state）。
+                "reg_ts": int(now.timestamp()),
                 "reported_at": None,
                 # 开赛提醒（--announce）渲染 Match Preview 卡要用的快照：
                 # 登记时页面手上就有，不存的话提醒卡只能画灰底占位块。
@@ -7495,31 +7501,45 @@ def selftest():
                 ("1 C", "0 A", "100 A", "01 A", "-1 A", "1", "1 A B", "x",
                  "1A", "我的 1", "a b", "1 a b")))
 
-    # ③ 封盘线公式
+    # ③ 封盘线公式（v2：登记即开放、开赛前封盘、各赛制一致）
     def _bclose(bo, ts=1000, **kw):
         e = dict(_esb)
         e.update(kw)
         return bet_close_ts({"bo": bo, "ts": ts}, e)
 
-    t.check("封盘线公式：Bo1/Bo3/Bo5 = est + grace − 15 分",
-            _bclose("Bo1") == 1000 + 50 * 60 - 15 * 60
-            and _bclose("Bo3") == 1000 + 100 * 60 - 15 * 60
-            and _bclose("Bo5") == 1000 + 170 * 60 - 15 * 60)
-    t.check("封盘线永远晚于开赛（配置改成 0/超大也不会压到开赛前）",
-            all(_bclose(bo, bet_close_before_grace_minutes=m) > 1000
-                for bo in ("Bo1", "Bo3", "Bo5") for m in (0, 15, 60, 999)))
-    t.check("认不出的赛制按 Bo3 兜底（与 _settle_seconds 同一张表）",
-            _bclose("Bo9") == 1000 + 100 * 60 - 15 * 60)
+    t.check("⚑ 封盘线公式（v2）：各赛制一致 = est − 10 分（开赛前封盘）",
+            _bclose("Bo1") == 1000 - 600
+            and _bclose("Bo3") == 1000 - 600
+            and _bclose("Bo5") == 1000 - 600
+            and _bclose("Bo9") == 1000 - 600)      # 认不出的赛制也一样
+    t.check("封盘线永远不晚于开赛（配置改成 0/超大也压不到开赛后）",
+            all(_bclose(bo, bet_close_before_start_minutes=m) <= 1000
+                for bo in ("Bo1", "Bo3", "Bo5") for m in (0, 10, 60, 999)))
+    t.check("封盘提前量钳制 0~60 分钟（配置手误 999 按 60 算，不静默失效）",
+            _bclose("Bo3", bet_close_before_start_minutes=999) == 1000 - 60 * 60
+            and _bclose("Bo3", bet_close_before_start_minutes=-5) == 1000)
 
-    # ④ 状态机真值表
+    # ④ 状态机真值表（v2：reg_ts 前未开放 → 封盘线前开放 → 之后已封盘）
+    # ⚠️ reg_ts 必须早于 close(=est−600)才是正常窗口；晚了就是「出生即封盘」（下面单独一条）。
     _now_at = lambda ts: datetime.fromtimestamp(ts, CST)
-    _itb = {"teams": ["A", "B"], "ts": 1000, "bo": "Bo3"}
-    t.check("状态机：未开放 → 开放 → 已封盘（边界取开/取闭都对）",
-            bet_round_state(_itb, _now_at(999), _esb) == "upcoming"
-            and bet_round_state(_itb, _now_at(1000), _esb) == "open"
-            and bet_round_state(_itb, _now_at(1000 + 85 * 60 - 1), _esb) == "open"
-            and bet_round_state(_itb, _now_at(1000 + 85 * 60), _esb) == "closed")
-    t.check("⚑ 状态机：status 判定永远优先于时间（reported 在开赛前也是 settled）",
+    _itb = {"teams": ["A", "B"], "ts": 1000, "bo": "Bo3", "reg_ts": 100}
+    t.check("⚑ 状态机（v2）：登记前未开放 → 开放 → 开赛前封盘（边界取开/取闭都对）",
+            bet_round_state(_itb, _now_at(99), _esb) == "upcoming"
+            and bet_round_state(_itb, _now_at(100), _esb) == "open"
+            and bet_round_state(_itb, _now_at(399), _esb) == "open"
+            and bet_round_state(_itb, _now_at(400), _esb) == "closed"
+            and bet_round_state(_itb, _now_at(999), _esb) == "closed")
+    t.check("⚑ 登记即开放：总预告发布后、开赛前就能下注（v2 核心行为）",
+            bet_round_state({"teams": ["A", "B"], "ts": 1000 + 6 * 3600,
+                             "bo": "Bo3", "reg_ts": 1000},
+                            _now_at(1000 + 3600), _esb) == "open")
+    t.check("出生即封盘：登记时已过封盘线（开赛前 10 分钟内才登记）→ 直接 closed",
+            bet_round_state({"teams": ["A", "B"], "ts": 1000 + 300,
+                             "bo": "Bo3", "reg_ts": 1000}, _now_at(1000), _esb) == "closed")
+    t.check("reg_ts 向后兼容：旧条目没有该字段 → 当早已登记（不卡在未开放）",
+            bet_round_state({"teams": ["A", "B"], "ts": 1000 + 3600,
+                             "bo": "Bo3"}, _now_at(1000), _esb) == "open")
+    t.check("⚑ 状态机：status 判定永远优先于时间（reported 在登记前也是 settled）",
             bet_round_state(dict(_itb, status="reported"), _now_at(1), _esb) == "settled"
             and bet_round_state(dict(_itb, status="abandoned"), _now_at(1), _esb) == "cancelled"
             and bet_round_state(dict(_itb, status="pending"), _now_at(1), _esb) == "upcoming")
@@ -7532,7 +7552,7 @@ def selftest():
     _seed_rounds = {
         _SEED_KEY: {
             "group": "1056302577", "teams": ["Vitality", "NAVI"], "ts": 1000,
-            "bo": "Bo3", "tour": "", "close_ts": 1000 + 85 * 60,
+            "bo": "Bo3", "tour": "", "close_ts": 1000 - 600,
             "bets": [{"uid": "123", "nick": "群友A", "pick": "A",
                       "pick_team": "Vitality", "at": 1001, "changed": 0},
                      {"uid": "456", "nick": "群友B", "pick": "B",
@@ -7696,12 +7716,11 @@ def selftest():
             and int(_esb.get("cmd_cooldown_seconds")) == 30)
     t.check("bet_enabled 默认 false（关着 = 一行功能路径都不走）",
             _esb.get("bet_enabled") is False)
-    t.check("规则文案按配置现算（改封盘线不会说谎）",
-            "Bo1 +35 分" in bet_rules_text(_esb)
-            and "Bo3 +85 分" in bet_rules_text(_esb)
-            and "Bo5 +155 分" in bet_rules_text(_esb)
-            and "Bo3 +70 分" in bet_rules_text(
-                dict(_esb, bet_close_before_grace_minutes=30)))
+    t.check("规则文案按配置现算（改封盘提前量不会说谎）",
+            "开赛前 10 分钟封盘" in bet_rules_text(_esb)
+            and "预计开赛前 10 分钟" in bet_rules_text(_esb)
+            and "开赛前 30 分钟封盘" in bet_rules_text(
+                dict(_esb, bet_close_before_start_minutes=30)))
     _cfg_dry = {"channels": ["console"]}
     _es_dry = dict(_esb, bet_enabled=True, bet_dry_run=True)
     _mbet = {"message": "[CQ:at,qq=1] /bet", "group_id": "99", "real_seq": 7,
@@ -7745,7 +7764,9 @@ def selftest():
             and _hm(9) == "10-09 20:10" and _hm(12, "09:05") == "09:05")
     _t_now = int(datetime.now(CST).timestamp())
     _items_lst = [
-        {"teams": ["Team Vitality", "NAVI"], "ts": _t_now - 600, "bo": "Bo3"},
+        # v2：登记（reg_ts）在过去、开赛（ts）在 2 小时后 → 现在就能押
+        {"teams": ["Team Vitality", "NAVI"], "ts": _t_now + 7200,
+         "bo": "Bo3", "reg_ts": _t_now - 3600},
         {"teams": ["G2 Esports", "FaZe Clan"], "ts": _t_now - 86400 * 2,
          "bo": "Bo3", "status": "reported", "winner": "G2 Esports",
          "score": "2:0"},
@@ -7759,6 +7780,45 @@ def selftest():
             and (datetime.fromtimestamp(_t_now - 86400 * 2, CST)
                  .strftime("%m-%d")) in _body
             and "下注：/bet 1 A 或 /bet 1 B" in _body)
+    t.check("列表头行写明 v2 窗口（总预告发布后开放 · 开赛前 N 分钟封盘）",
+            "总预告发布后开放，开赛前 10 分钟封盘" in _body
+            and "总预告发布后开放，开赛前 25 分钟封盘" in _bet_list_body(
+                _items_lst, {"rounds": {}, "users": {}}, "777",
+                datetime.fromtimestamp(_t_now, CST),
+                dict(_esb, bet_enabled=True,
+                     bet_close_before_start_minutes=25)))
+    # v2：登记即写 reg_ts（/bet 的开放锚点）—— 绝不让「未开放」卡住
+    _pf = os.path.join(tempfile.gettempdir(), "pending_selftest_%d.json" % os.getpid())
+    try:
+        for _p in (_pf, _pf + ".tmp", _pf + ".lock"):
+            with contextlib.suppress(OSError):
+                os.remove(_p)
+        _n = note_pending([{"teams": ["Alpha", "Beta"], "ts": _t_now + 3600,
+                            "bo": "Bo3", "tour": "T"}],
+                          datetime.fromtimestamp(_t_now, CST), _esb, _pf)
+        _it0 = (load_results_pending(_pf).get("items") or [{}])[0]
+        t.check("note_pending 登记时写 reg_ts（= 总预告发布时刻，/bet 开放锚点）",
+                _n == 1 and int(_it0.get("reg_ts") or 0) == _t_now
+                and bet_round_state(_it0, datetime.fromtimestamp(_t_now, CST),
+                                    _esb) == "open")
+    finally:
+        for _p in (_pf, _pf + ".tmp", _pf + ".lock"):
+            with contextlib.suppress(OSError):
+                os.remove(_p)
+    # v2：upcoming 实际不可见，「没有可下注」只可能是都过了封盘线
+    _body_nx = _bet_list_body(
+        [{"teams": ["Alpha", "Beta"], "ts": _t_now + 300, "bo": "Bo3",
+          "reg_ts": _t_now - 3600, "status": "pending"}],
+        {"rounds": {}, "users": {}}, "777",
+        datetime.fromtimestamp(_t_now, CST), _esb)
+    t.check("没有可下注时：说出下一场的开赛与封盘状态（不让人反复问）",
+            "当前没有开放下注的比赛" in _body_nx
+            and "下一场：Alpha vs Beta" in _body_nx
+            and "预计" in _body_nx and "已封盘" in _body_nx)
+    t.check("清单里没有未开赛的比赛 → 明说「接下来没有已预告的比赛」",
+            _bet_list_body([], {"rounds": {}, "users": {}}, "777",
+                           datetime.fromtimestamp(_t_now, CST), _esb)
+            == "【CS2 竞猜】接下来没有已预告的比赛")
 
     return t.done("selftest")
 
@@ -8327,10 +8387,23 @@ def run_listen(cfg, args):
 
 BET_USAGE = "用法：/bet 看列表 · /bet 1 A 下注 · /bet 我的 · /bet 排行 · /bet 规则"
 
-# 封盘线的下限：绝不允许早于「开赛 + 10 分钟」。配置被改成极大值时
-# （bet_close_before_grace_minutes=999），没有这道钳制就会出现
-# 「未开放」直接变「已封盘」—— 竞猜静默失效且毫无报错。
-BET_CLOSE_FLOOR_SECONDS = 600
+# 封盘提前量的钳制范围（分钟）。v2 规则下封盘线在开赛前，配置手误（如 999）
+# 会让封盘线跑到登记时刻之前 → 所有比赛「出生即封盘、静默不可押」。
+# 钳在 0~60 分钟：0 = 开赛即封盘（仍早于旧规则的任何形态），60 = 上限。
+BET_CLOSE_BEFORE_MIN_MAX = 60
+
+
+def _bet_close_before_s(es):
+    """封盘提前量（秒）= `bet_close_before_start_minutes`，钳制在 0~60 分钟。
+
+    `bet_close_ts` 与 `bet_rules_text` **必须共用这一个函数** —— 规则文案按
+    当前配置现算，两边算法不一致就会「文档说谎」（自检断言钉住）。
+    """
+    try:
+        n = int(es.get("bet_close_before_start_minutes") or 0)
+    except (TypeError, ValueError):
+        n = 0
+    return min(max(0, n), BET_CLOSE_BEFORE_MIN_MAX) * 60
 
 _CN_IDX = "①②③④⑤⑥⑦⑧⑨⑩⑪⑫⑬⑭⑮⑯⑰⑱⑲⑳"
 _BET_NUM_RE = re.compile(r"^[1-9][0-9]?$")
@@ -8436,15 +8509,15 @@ def _bet_key(item):
 
 
 def bet_close_ts(item, es):
-    """封盘线 = est + grace(bo) − bet_close_before_grace_minutes（秒）。
+    """封盘线 = est − bet_close_before_start_minutes（秒）。**v2 规则（2026-10-12）**。
 
-    锚在 grace（机器人自己开始抓结果的时刻）往前退，而不是「预计结束时刻」：
-    后者会让一场 70 分钟就 2:0 的 Bo3 在赛果公开 65 分钟后还收注（BET_PLAY.md §3.4）。
+    下注窗口 = 今日总预告发布（登记）→ 开赛前封盘，**各赛制一致**：
+    赛中竞猜信息不对称（群里观众看着比分下注），Bo5 还要打三小时；
+    开赛前封盘把这两个问题一起解决（BET_PLAY.md §3 v2 / §3.6 局限 1 的开关位）。
+    `reg_ts` 之前（含旧数据缺省 0）视为已登记 —— 开放锚点见 `bet_round_state`。
     """
     ts = int(item.get("ts") or 0)
-    grace_s, _timeout_s = _settle_seconds(item.get("bo"), es)
-    before = max(0, int(es.get("bet_close_before_grace_minutes") or 0)) * 60
-    return max(ts + grace_s - before, ts + BET_CLOSE_FLOOR_SECONDS)
+    return ts - _bet_close_before_s(es)
 
 
 def bet_round_state(item, now, es):
@@ -8452,6 +8525,11 @@ def bet_round_state(item, now, es):
 
     ⚠️ 判定顺序即语义：**status 永远在时间之前** —— reported/abandoned 的场次
     哪怕时钟回到开赛前也一律不接受下注（BET_PLAY.md §3.5 硬兜底）。
+
+    v2 时间规则（2026-10-12）：**登记即开放**（`reg_ts`，= 今日总预告发布时刻），
+    **开赛前封盘**（`close = est − bet_close_before_start_minutes`）。
+    条目只在登记后才存在于清单里，所以「未开放(upcoming)」实际不可见 ——
+    保留它是为了 `reg_ts` 将来到来时的语义完整（自检有断言钉住）。
     """
     status = (item.get("status") or "").strip()
     if status == "reported":
@@ -8459,7 +8537,7 @@ def bet_round_state(item, now, es):
     if status == "abandoned":
         return "cancelled"
     t = now.timestamp()
-    if t < int(item.get("ts") or 0):
+    if t < int(item.get("reg_ts") or 0):
         return "upcoming"
     if t < bet_close_ts(item, es):
         return "open"
@@ -8489,19 +8567,14 @@ def bet_parse_args(rest):
 
 
 def bet_rules_text(es):
-    """规则说明。封盘线按**当前配置**现算 —— 写死数字的话改配置就会说谎。"""
-    before = max(0, int(es.get("bet_close_before_grace_minutes") or 0))
+    """规则说明。封盘提前量按**当前配置**现算 —— 写死数字的话改配置就会说谎。"""
+    before = _bet_close_before_s(es) // 60
     pts = max(0, int(es.get("bet_points_per_hit") or 1))
-
-    def _off(bo):
-        grace_s, _t = _settle_seconds(bo, es)
-        return int(round(grace_s / 60.0)) - before
 
     return "\n".join([
         "【CS2 竞猜规则】",
-        "· 下注窗口：开赛（按预告登记的开赛时间）→ 封盘线，封盘后停止下注",
-        "· 封盘线（开赛后）：Bo1 +%d 分 / Bo3 +%d 分 / Bo5 +%d 分"
-        % (_off("Bo1"), _off("Bo3"), _off("Bo5")),
+        "· 下注窗口：今日总预告发布（09:30 登记）→ 每场开赛前 %d 分钟封盘" % before,
+        "· 封盘线：各赛制一致 = 预计开赛前 %d 分钟" % before,
         "· 猜中 +%d 分；封盘前可随时改单；弃赛/取消的场次竞猜作废" % pts,
         "· 命令：/bet 看列表 · /bet 我的 · /bet 排行 · /bet 规则",
     ])
@@ -8613,7 +8686,8 @@ def _bet_row_label(idx, st, it, es, now, my_pick):
     if st == "open":
         bits.append("%s 封盘" % _bet_hm(bet_close_ts(it, es), now))
     elif st == "upcoming":
-        bits.append("%s 开放" % _bet_hm(it.get("ts"), now))
+        # v2：开放锚点是登记时刻（总预告发布），不是开赛时刻
+        bits.append("%s 开放" % _bet_hm(int(it.get("reg_ts") or 0), now))
     elif st == "closed":
         bits.append("已封盘")
     elif st == "settled":
@@ -8628,21 +8702,31 @@ def _bet_row_label(idx, st, it, es, now, my_pick):
 
 def _bet_list_body(items, bets, uid, now, es):
     limit = max(1, int(es.get("bet_max_list_rows") or 12))
+    before = _bet_close_before_s(es) // 60
     rows = _bet_visible(items, now, es)
     live = [(st, it) for st, it in rows if st in ("open", "upcoming")]
     if not live:
-        # 没有可下注的：把「下一场什么时候」说出来，免得用户反复问
+        # 没有可下注的：把「下一场什么时候」说出来，免得用户反复问。
+        # ⚠️ v2 规则下 upcoming 实际不可见（登记即开放），「没有可下注」只意味着
+        #    所有已登记比赛都过了封盘线 —— 下一场按 est 找（同旧语义：未开赛的）。
         nxt = None
         for it in items or []:
-            if bet_round_state(it, now, es) == "upcoming":
-                if nxt is None or int(it.get("ts") or 0) < int(nxt.get("ts") or 0):
-                    nxt = it
+            # 与 bet_round_state 同语义：只排除已出结果/已放弃，缺省 status 视为 pending
+            if (it.get("status") or "") in ("reported", "abandoned"):
+                continue
+            if int(it.get("ts") or 0) <= now.timestamp():
+                continue
+            if nxt is None or int(it.get("ts") or 0) < int(nxt.get("ts") or 0):
+                nxt = it
         if nxt is None:
             return "【CS2 竞猜】接下来没有已预告的比赛"
-        return ("【CS2 竞猜】当前没有开放下注的比赛\n下一场：%s（%s 开放，%s 封盘）"
-                % (_bet_pair(nxt), _bet_hm(nxt.get("ts"), now),
-                   _bet_hm(bet_close_ts(nxt, es), now)))
-    lines = ["【CS2 竞猜】可下注 %d 场（开赛后开放）" % len(live)]
+        close = bet_close_ts(nxt, es)
+        close_txt = ("%s 封盘" % _bet_hm(close, now)
+                     if now.timestamp() < close else "已封盘")
+        return ("【CS2 竞猜】当前没有开放下注的比赛\n下一场：%s（预计 %s 开赛，%s）"
+                % (_bet_pair(nxt), _bet_hm(nxt.get("ts"), now), close_txt))
+    lines = ["【CS2 竞猜】可下注 %d 场（总预告发布后开放，开赛前 %d 分钟封盘）"
+             % (len(live), before)]
     shown = rows[:limit]
     for i, (st, it) in enumerate(shown, 1):
         lines.append(_bet_row_label(i, st, it, es, now, _bet_my_pick(bets, it, uid)))
@@ -8691,7 +8775,7 @@ def _bet_mine_body(items, bets, uid, now, es):
         else:
             it = idx.get(_bet_key(r))
             st = {"open": "%s 封盘" % _bet_hm(bet_close_ts(it, es), now),
-                  "upcoming": "%s 开放" % _bet_hm(r.get("ts"), now),
+                  "upcoming": "%s 开放" % _bet_hm(int(it.get("reg_ts") or 0), now),
                   "closed": "已封盘，待开奖"}.get(
                 bet_round_state(it, now, es) if it else "closed", "待开奖")
         lines.append("%s %s · 猜 %s · %s" % (when, pair, b.get("pick"), st))

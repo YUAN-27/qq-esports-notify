@@ -129,10 +129,10 @@
     "cmd_bot_qq": "",
     "cmd_max_attempts": 3,
 
-    "_comment_esports_bet": "bet_enabled / bet_points_per_hit / bet_close_before_grace_minutes / bet_cooldown_seconds / bet_max_list_rows / bet_announce_max_tries / bet_dry_run：**群内趣味竞猜**（@ 机器人 `/bet`）。群里对已预告的比赛竞猜胜者：开赛后（按预告登记的开赛时间）开放下注，封盘后停止，猜中 +1 分。设计见 deploy/BET_PLAY.md。⚠️ **默认关闭**（bet_enabled=false）：关着时 `/bet` 只回一句「竞猜功能未开启」，一行功能路径都不走，回滚只需改回 false。零新增网络请求（可下注列表直接读 state_results_pending.json）、零新增 systemd 单元（下注挂在 douyu-cmd，结算对账搭 douyu-esports-results）。bet_close_before_grace_minutes（默认 15）= 封盘线 = 登记开赛时刻 + grace(赛制) − 这个分钟数（Bo1 +35 分 / Bo3 +85 分 / Bo5 +155 分）——锚在「机器人开始抓结果」前 15 分钟，保证下注窗口绝不越过机器人知情的时刻。bet_cooldown_seconds（默认 5）是 /bet 专属冷却，且是全项目第一个**按用户**维度（键 = 群号|bet|uid）而不是 cmd_cooldown_seconds 那种全群维度——全群冷却会把别人在窗内的下注静默吞掉。bet_announce_max_tries（默认 5）是开奖消息重发上限（分数在锁内已入账，消息是尽力的，超限放弃不刷屏）。bet_dry_run（默认 false）= 灰度开关：true 时回复与开奖消息只落日志不进群、状态照常变更，上线灰度用，放量前必须关。竞猜状态在 state_bets.json（下注记录 + 积分），与别条流水线的状态文件互不相干。",
+    "_comment_esports_bet": "bet_enabled / bet_points_per_hit / bet_close_before_start_minutes / bet_cooldown_seconds / bet_max_list_rows / bet_announce_max_tries / bet_dry_run：**群内趣味竞猜**（@ 机器人 `/bet`）。群里对已预告的比赛竞猜胜者：**今日总预告发布（09:30 登记）即开放下注**，每场开赛前封盘，猜中 +1 分。设计见 deploy/BET_PLAY.md。⚠️ **默认关闭**（bet_enabled=false）：关着时 `/bet` 只回一句「竞猜功能未开启」，一行功能路径都不走，回滚只需改回 false。零新增网络请求（可下注列表直接读 state_results_pending.json）、零新增 systemd 单元（下注挂在 douyu-cmd，结算对账搭 douyu-esports-results）。bet_close_before_start_minutes（默认 10）= 封盘线 = 登记开赛时刻(est) − 这个分钟数，**各赛制一致**（v2 规则，2026-10-12：旧规则是 est + grace − 15 分即赛中封盘，信息不对称且 Bo5 要打三小时；钳制 0~60 分钟防配置手误把全场变成静默不可押）。bet_cooldown_seconds（默认 5）是 /bet 专属冷却，且是全项目第一个**按用户**维度（键 = 群号|bet|uid）而不是 cmd_cooldown_seconds 那种全群维度——全群冷却会把别人在窗内的下注静默吞掉。bet_announce_max_tries（默认 5）是开奖消息重发上限（分数在锁内已入账，消息是尽力的，超限放弃不刷屏）。bet_dry_run（默认 false）= 灰度开关：true 时回复与开奖消息只落日志不进群、状态照常变更，上线灰度用，放量前必须关。竞猜状态在 state_bets.json（下注记录 + 积分），与别条流水线的状态文件互不相干。",
     "bet_enabled": false,
     "bet_points_per_hit": 1,
-    "bet_close_before_grace_minutes": 15,
+    "bet_close_before_start_minutes": 10,
     "bet_cooldown_seconds": 5,
     "bet_max_list_rows": 12,
     "bet_announce_max_tries": 5,
