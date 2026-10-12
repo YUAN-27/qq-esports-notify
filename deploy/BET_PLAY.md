@@ -1,6 +1,6 @@
 # 群内趣味竞猜（@ 机器人 · `/bet`）—— 设计文档
 
-> **状态：已实现（2026-10-12），尚未部署、未启用。** 本文回答「 `/bet` 到底长什么样、
+> **状态：已实现（2026-10-12），灰度中（dry-run）。** 本文回答「 `/bet` 到底长什么样、
 > 什么时候能下注、怎么算猜中、哪些情况会翻车」，以及一份可以照着执行的实施与回滚步骤。
 > 命令的收发机制（四道闸门、水位线、冷却）在 **`deploy/CMD_INTERACT.md`**，
 > 本文只写竞猜本身，**不重复那套机制，只写与它的三个耦合点**（§9）。
@@ -12,10 +12,15 @@
 > **冷却从全群维度改成按用户**、**结算从「顺手结算」改成对账循环**。这三处各有一节 + 一条自检断言钉着。
 >
 > **实现落地记录（2026-10-12）**：代码全在 `deploy/esports.py`（搜 `BET_PLAY.md` 可见
-> 分区注释），配置同 `config.example.json`；`esports.py --selftest` 满配 **513 项通过 / 0 失败**
-> （基线 483 + 本文 §11 的 30 条断言），`selftest.py` / `watchdog.py --selftest` /
-> `check-secrets.py` 全绿。**尚未部署**（`bet_enabled` 默认 false，部署后也是关着的），
-> 上线顺序见 §12。
+> 分区注释），配置同 `config.example.json`；`esports.py --selftest` 满配 **516 项通过 / 0 失败**
+> （基线 483 + 本文 §11 的 33 条断言），`selftest.py` / `watchdog.py --selftest` /
+> `check-secrets.py` 全绿。**灰度中**：`bet_enabled=true` + `bet_dry_run=true`（回复只落
+> `/var/log/douyu-watch/cmd.log`，状态照常变更），上线顺序见 §12。
+> **2026-10-12 灰度实测后的三处展示层修复**（纯文案，零逻辑变更）：① 队名截断 12 → 16
+> 字符并补省略号（`Team Vitality` 不再被砍成半截）；② 时间显示往日行加「昨天 / MM-DD」
+> 标记（列表垫着已开奖的旧场次，裸 `HH:MM` 会被误认为是今晚下一场）；③ 列表头行只说
+> 可下注场次，非可下注行附「（后附 N 场已封盘/已开奖，仅供对照，不能再押）」。
+> 三条各有一条自检断言（§11 第 ⑬ 组）。
 
 ---
 
@@ -127,13 +132,20 @@ vs `NAVI Junior`……），用 A/B 零歧义、零别名维护。队名只在**
 ### 2.5 回复模板全集
 
 所有回复都带 `[CQ:reply,id=<message_id>]` 前缀（与 `/赛事` 一致，群里看得出是回哪条）。
-队名单个截断到 12 字符；昵称截断到 12 字符（净化规则见 §10 坑 1）。
+队名单个截断到 16 字符（超出补 `…`，看得出是刻意截断）；昵称截断到 12 字符（净化规则见 §10 坑 1）。
+时间一律 `HH:MM`，跨天加标记：未来「次日 / N 天后」，往日「昨天 / MM-DD」—— 列表会把
+已封盘/已开奖的场次垫在后面（只留最近的，`bet_max_list_rows` 条），往日行没日期会被
+误以为是今晚的下一场（2026-10-12 灰度实测踩坑，三处展示层修复见文首「实现落地记录」）。
 
-**列表（有可下注）**
+**列表（有可下注）** —— 头行只说**可下注**的场次；已封盘/已开奖的行只是垫尾参照，
+显式标注「不能再押」（否则「可下注 1 场」下列了 5 行，用户以为坏了，2026-10-12 实测）
 ```
 【CS2 竞猜】可下注 2 场（开赛后开放）
 ① 20:00 Vitality vs NAVI · Bo3 · 21:25 封盘 · 你猜了 A
-② 23:30 G2 vs Falcons · Bo3 · 00:45 封盘（明日）
+② 23:30 G2 vs Falcons · Bo3 · 次日 00:45 封盘
+（后附 2 场已封盘/已开奖，仅供对照，不能再押）
+③ 昨天 20:10 FaZe vs MOUZ · Bo3 · 已开奖 2:1
+④ 10-08 22:00 Liquid vs Spirit · Bo3 · 已开奖 1:2
 下注：/bet 1 A 或 /bet 1 B（A=①主队）
 我的：/bet 我的 · 排行：/bet 排行 · 规则：/bet 规则
 ```
@@ -735,6 +747,9 @@ dry-run 期间群里真人下的注是**真计入**的，只是他们看不到�
       `results_max_age_hours` → 静默作废、不加分、不发消息。
 - [ ] **断言 12**（回归 · 水位线）：`/bet` 复用 `wm_pending` / `wm_after_handle`，
       首跑与序号重置行为不变（不新增水位线逻辑，这条断言防「顺手改了共用函数」）。
+- [ ] **断言 13**（单测 · 展示层三件套，2026-10-12 灰度实测后补）：`_clip` ≤16 原样、
+      超出补 `…`；`_bet_hm` 今天裸 `HH:MM`，跨天带「次日 / N 天后 / 昨天 / MM-DD」；
+      列表非可下注行附「（后附 N 场已封盘/已开奖，仅供对照，不能再押）」。
 
 ---
 
@@ -749,9 +764,10 @@ dry-run 期间群里真人下的注是**真计入**的，只是他们看不到�
  1. 实现 + 三自检（esports --selftest / selftest.py / watchdog --selftest）+ check-secrets 全绿
  2. commit + push（origin 走 SSH）→ python pack_deploy.py
     （BET_PLAY.md 进 REQUIRED 清单，包从 52 个文件变 53 个）→ workbench 部署
- 3. 服务器 config.json 的 esports 段：bet_enabled = false，bet_dry_run = true
- 4. 灰度：前台重跑 --listen（或重启 douyu-cmd），群里敲 /bet —— 回复落日志不进群，
-    用 journalctl -u douyu-cmd 核对每条回复的文案与判定
+ 3. 服务器 config.json 的 esports 段：bet_enabled = true，bet_dry_run = true
+    （功能开着但只落日志不进群；状态照常变更，下注/积分都真实生效）
+ 4. 灰度：重启 douyu-cmd，群里敲 /bet —— 回复只落 `/var/log/douyu-watch/cmd.log`
+    （`StandardOutput=append:`，**不是 journalctl**），逐条核对文案与判定
  5. 真人实测（dry-run 仍开着也无妨，看日志）：/bet、/bet 1 A、改单、未开放、已封盘。
     封盘边界的秒级竞态与结算幂等**用单测覆盖**，不靠群里卡点演
  6. bet_dry_run = false → 正式上线（bet_enabled = true 在步骤 3 就已为 true 的话，此刻即放量）

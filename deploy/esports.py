@@ -7721,6 +7721,45 @@ def selftest():
     t.check("bet_enabled=false 时 /bet 回一句「未开启」而不是静默",
             _out3 == "ok")
 
+    # ⑬ 展示层三处观感修复（2026-10-12 灰度实测：纯文案，不动逻辑）
+    #     · 队名截断 12 → 16 且补省略号（「Team Vitality」不再被砍成半截）
+    #     · 往日行带日期标记（列表混着昨天的已开奖场次，裸 HH:MM 会误导）
+    #     · 列表头行与行数不一致时，非可下注行附「仅供对照」说明
+    t.check("队名截断：≤16 原样、超出补省略号（刻意截断看得出，不是乱码）",
+            _clip("Team Vitality") == "Team Vitality"
+            and _clip("Aurora Gaming") == "Aurora Gaming"
+            and _clip("Just Swing (CN)") == "Just Swing (CN)"
+            and _clip("0123456789abcdef") == "0123456789abcdef"
+            and _clip("0123456789abcdefg") == "0123456789abcde…"
+            and _clip("x" * 30) == "x" * 15 + "…"
+            and _clip("") == "" and _clip(None) == "")
+    _hm_now = datetime(2026, 10, 12, 12, 0, tzinfo=CST)
+
+    def _hm(day, hm="20:10"):
+        return _bet_hm(int(datetime(2026, 10, day, int(hm[:2]), int(hm[3:]),
+                                    tzinfo=CST).timestamp()), _hm_now)
+
+    t.check("时间显示：今天裸 HH:MM；跨天一律带标记（次日/N 天后/昨天/MM-DD）",
+            _hm(12) == "20:10" and _hm(13) == "次日 20:10"
+            and _hm(14) == "2 天后 20:10" and _hm(11) == "昨天 20:10"
+            and _hm(9) == "10-09 20:10" and _hm(12, "09:05") == "09:05")
+    _t_now = int(datetime.now(CST).timestamp())
+    _items_lst = [
+        {"teams": ["Team Vitality", "NAVI"], "ts": _t_now - 600, "bo": "Bo3"},
+        {"teams": ["G2 Esports", "FaZe Clan"], "ts": _t_now - 86400 * 2,
+         "bo": "Bo3", "status": "reported", "winner": "G2 Esports",
+         "score": "2:0"},
+    ]
+    _body = _bet_list_body(_items_lst, {"rounds": {}, "users": {}}, "777",
+                           datetime.fromtimestamp(_t_now, CST),
+                           dict(_esb, bet_enabled=True))
+    t.check("列表：头行只说可下注场次，非可下注行附「仅供对照」+ 往日行带日期",
+            "可下注 1 场" in _body
+            and "（后附 1 场已封盘/已开奖，仅供对照，不能再押）" in _body
+            and (datetime.fromtimestamp(_t_now - 86400 * 2, CST)
+                 .strftime("%m-%d")) in _body
+            and "下注：/bet 1 A 或 /bet 1 B" in _body)
+
     return t.done("selftest")
 
 
@@ -8304,10 +8343,14 @@ def _cn_idx(i):
     return _CN_IDX[i - 1] if 1 <= i <= len(_CN_IDX) else "%d." % i
 
 
-def _clip(s, limit=12):
-    """队名/昵称截断（列表一行放不下全名，战报里也这么干）。"""
+def _clip(s, limit=16):
+    """队名截断。⚠️ 2026-10-12 灰度实测：12 太紧 ——「Team Vitality」「Aurora Gaming」
+    「Just Swing (CN)」都会被砍成「Team Vitalit」「Aurora Gamin」「Just Swing (」，
+    群里看着像坏了。改 16，且砍断时补省略号（看得出是刻意截断，不是乱码）。"""
     s = (s or "").strip()
-    return s if len(s) <= limit else s[:limit]
+    if len(s) <= limit:
+        return s
+    return s[:limit - 1] + "…"
 
 
 def _bet_pair(item):
@@ -8315,10 +8358,21 @@ def _bet_pair(item):
 
 
 def _bet_hm(ts, now):
-    """HH:MM，跨天加「次日 / N 天后」（预告窗口最长 24h，实际只见「次日」）。"""
+    """HH:MM，跨天加标记：未来「次日 / N 天后」，往日「昨天 / MM-DD」。
+    ⚠️ 2026-10-12 灰度实测：列表会把昨天/前天的已开奖场次垫在后面，裸 HH:MM
+    会被误以为是今晚的下一场（20:10 到底是今天还是昨天？）—— 往日行必须带日期。"""
     d = datetime.fromtimestamp(int(ts or 0), CST)
     delta = (d.date() - now.date()).days
-    pre = "次日 " if delta == 1 else ("%d 天后 " % delta if delta > 1 else "")
+    if delta == 1:
+        pre = "次日 "
+    elif delta > 1:
+        pre = "%d 天后 " % delta
+    elif delta == -1:
+        pre = "昨天 "
+    elif delta < -1:
+        pre = "%s " % d.strftime("%m-%d")
+    else:
+        pre = ""
     return "%s%s" % (pre, d.strftime("%H:%M"))
 
 
@@ -8589,10 +8643,17 @@ def _bet_list_body(items, bets, uid, now, es):
                 % (_bet_pair(nxt), _bet_hm(nxt.get("ts"), now),
                    _bet_hm(bet_close_ts(nxt, es), now)))
     lines = ["【CS2 竞猜】可下注 %d 场（开赛后开放）" % len(live)]
-    for i, (st, it) in enumerate(rows[:limit], 1):
+    shown = rows[:limit]
+    for i, (st, it) in enumerate(shown, 1):
         lines.append(_bet_row_label(i, st, it, es, now, _bet_my_pick(bets, it, uid)))
-    if len(rows) > limit:
-        lines.append("……另有 %d 场已封盘/已开奖，不逐条列出" % (len(rows) - limit))
+    # ⚠️ 2026-10-12 灰度实测：头行说「可下注 1 场」却列了 5 行（1 未开放 + 4 已开奖），
+    # 用户以为坏了。非可下注的行必须显式说明「仅供对照，不能再押」。
+    ref_n = sum(1 for st, _ in shown if st not in ("open", "upcoming"))
+    more_n = len(rows) - len(shown)
+    if ref_n:
+        lines.append("（后附 %d 场已封盘/已开奖，仅供对照，不能再押）" % ref_n)
+    if more_n > 0:
+        lines.append("……另有 %d 场不逐条列出" % more_n)
     lines.append("下注：/bet 1 A 或 /bet 1 B（A=①主队）")
     lines.append("我的：/bet 我的 · 排行：/bet 排行 · 规则：/bet 规则")
     return "\n".join(lines)
