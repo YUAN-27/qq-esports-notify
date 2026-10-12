@@ -200,6 +200,16 @@ DAILY_STATE_FILE = os.path.join(HERE, "state_esports_daily.json")
 #    但它写的是**自己这个文件**，与 state_results_pending.json 互不相干 ——
 #    所以「命令进程把结算进程堵死」这类事故在结构上就不会发生。
 CMD_WATERMARK_FILE = os.path.join(HERE, "state_cmd_watermark.json")
+# 群内趣味竞猜（`/bet`）的下注记录与积分。设计见 `deploy/BET_PLAY.md`。
+# 结构：{ "version": 1,
+#         "rounds": {"<队名键>|<登记ts>": {teams, ts, bo, tour, close_ts, bets[], settled}},
+#         "users":  {"<uid>": {nick, pts, hits, total, last_pts_at}} }
+# 🔴 `rounds` 的键与 `_item_ident` 同源（队名规范键 + 登记 ts）—— 读日志时
+#    「这一场」在清单里和竞猜里是同一个东西。JSON 对象做键要字符串形态。
+# ⚠️ 这是**第 5 个**会写状态文件的进程（--listen 写下注、--results 写结算），
+#    但它写的是**自己这个文件**，与 state_results_pending.json 互不相干 ——
+#    「竞猜把结算堵死」这类事故在结构上就不会发生。
+BETS_STATE_FILE = os.path.join(HERE, "state_bets.json")
 
 # 状态文件落在这个目录；systemd 单元里用 ProtectSystem=full，只读 /usr /etc，
 # /opt 可写，所以和 watch.py 一样直接写在脚本旁边。
@@ -573,6 +583,32 @@ ESPORT_DEFAULTS = {
     # 一条命令最多尝试几次（含首次）。失败时水位线**不推进**（先发后落，宁可重复
     # 也不丢），但必须有上限 —— 否则 Liquipedia 一直挂着就会变成每几秒一次的高频重试。
     "cmd_max_attempts": 3,
+    # ---- 群内趣味竞猜（@ 机器人 · /bet）----
+    # 见 deploy/BET_PLAY.md。**只有 `--listen`（下注/查询）和 `--results`（结算对账）
+    # 读这些键**，其余四条流水线一行都不碰 —— 停掉 douyu-cmd 后这些键等于不存在。
+    # ⚠️ **默认 false**：关着时 `/bet` 只回一句「竞猜功能未开启」，
+    #    一行功能路径都不走（与 cito_enabled 同哲学）。回滚 = 改回 false。
+    "bet_enabled": False,
+    # 猜中加几分。免费玩、下注不消耗，所以这只是个荣誉分。
+    "bet_points_per_hit": 1,
+    # 封盘线 = 登记开赛时刻 + grace(赛制) − 这个分钟数。
+    # 锚在 grace（= 机器人自己开始抓结果的时刻）往前退，**绝不允许下注窗口越过
+    # 机器人知情的时刻**；15 分钟同时是「最后一个下注」与「最早可能的结算读取」
+    # 之间的结构缓冲（BET_PLAY.md §3.2 / §3.5）。
+    "bet_close_before_grace_minutes": 15,
+    # /bet 的冷却。⚠️ 它是全项目第一个**按用户**维度的冷却（键 = 群号|bet|uid），
+    # 不是 cmd_cooldown_seconds 那种全群维度 —— 全群冷却会把别人在窗内的下注
+    # 静默吞掉。值也独立：/bet 零网络，用不上 30 秒的风控预算，且下注是连续动作
+    # （看列表 → 下注 → 改单都在几秒内），30 秒会把正常流程打断（BET_PLAY.md §9.2）。
+    "bet_cooldown_seconds": 5,
+    # 可下注列表最多列几行（超出显示「等 N 场」）。编号对全量生效。
+    "bet_max_list_rows": 12,
+    # 开奖消息最多重发几次。分数在锁内已入账，消息是尽力的 —— 超限就放弃，
+    # 宁可少一条群消息，也不要每 10 分钟重试一次刷屏。
+    "bet_announce_max_tries": 5,
+    # 灰度开关：true 时 /bet 的回复与开奖消息**只落日志不进群**，状态照常变更。
+    # 上线灰度用（BET_PLAY.md §12 步骤 4）；正式放量前必须关掉。
+    "bet_dry_run": False,
     # ---- 选手数据（Cito API）----
     # 见 deploy/CITO_PLAYERS.md。单场战报的选手段（每张图的 K-D / ADR / KAST / Rating）。
     # ⚠️ **默认 false**：关着的时候一次网络请求都不发，行为与「没有这个功能」完全一致。
@@ -4187,6 +4223,20 @@ def run_results(cfg, args):
             return _prune_pending(fresh, now, es)
         return update_pending(_apply)
 
+    def _reconcile_bets():
+        """`/bet` 竞猜对账（零网络、幂等）。**check 模式绝不写状态/发消息。**
+
+        竞猜是挂在旁边的平行功能：它的任何故障都不该影响战报线，
+        所以整段 try 住、只记日志，下一轮自然重试（对账是幂等的）。
+        """
+        if check:
+            return
+        try:
+            bet_reconcile(cfg, es)
+        except Exception as exc:  # noqa: BLE001
+            log("[warn] 竞猜对账出错（%s: %s）—— 不影响战报，下轮重试"
+                % (type(exc).__name__, exc))
+
     if expired:
         log("[info] %d 场超过结算上限仍没出结果，判定为延期/取消，不再等：%s"
             % (len(expired), _pairs_label(expired)))
@@ -4198,6 +4248,7 @@ def run_results(cfg, args):
                 % len([it for it in data["items"] if it.get("status") == "pending"]))
             if expired:
                 _persist([])
+            _reconcile_bets()
             return 0
         # --check-results 是给人看的演练命令，**清单空着也得给点东西看** ——
         # 否则刚部署的服务器上跑它永远只会得到「清单里没有…」，等于没法验收。
@@ -4230,6 +4281,7 @@ def run_results(cfg, args):
     if not rows:
         log("[info] 到点的 %d 场都还没打完，留到下一轮（不写状态、不重复查已完成的）"
             % len(due))
+        _reconcile_bets()
         return 0
 
     # ---- 逐图比分：可选步骤，抓不到只是卡片少几行，绝不影响发送 ----
@@ -4304,6 +4356,10 @@ def run_results(cfg, args):
     # 末尾必须补一次，否则下一轮又拿同一批过期条目问一遍。
     if not sent:
         _persist([])
+
+    # /bet 竞猜对账：清单里 reported 且有人押过 → 结算 + 尽力发开奖（零网络、幂等）。
+    # 放在战报发送之后：用户先看到比分，再看到开奖，顺序才自然。
+    _reconcile_bets()
 
     if not_sent:
         log("[error] 本轮 %d 场：发出 %d 场、%d 场没发出去（没发的下一轮重试）"
@@ -7406,6 +7462,265 @@ def selftest():
             os.path.basename(CITO_USAGE_FILE).startswith("state_")
             and CITO_USAGE_FILE.endswith(".json"))
 
+    # ---- /bet 群内趣味竞猜（@ 机器人 · /bet）----
+    # 设计文档：deploy/BET_PLAY.md §11。⚑ 标记的几条是变异测试对象
+    # （把源码临时改回「有 bug 写法」必须 FAIL），纪律见文档 §11 顶部。
+    print("\n-- /bet 群内趣味竞猜（@ 机器人 · /bet）--")
+
+    _esb = dict(es)
+
+    # ① 命令识别：/赛事 精确匹配路径没被 /bet 前缀分支顶掉
+    t.check("结构：/赛事 仍走精确匹配（整条相等，带后缀/闲聊都不认）",
+            parse_command("[CQ:at,qq=1] /赛事") == "/赛事"
+            and parse_command("/赛事 谢谢") is None
+            and parse_command("我觉得 /赛事 不错") is None
+            and CMD_SCHEDULE in CMD_REGISTRY and CMD_BET in CMD_REGISTRY)
+    t.check("/bet 前缀识别 + 参数原样带回；长得像的一律不认",
+            resolve_command("/bet") == ("/bet", None)      # 无参：精确匹配命中注册表
+            and resolve_command("/bet 1 A") == ("/bet", "1 A")
+            and resolve_command("/bet  我的 ") == ("/bet", " 我的")
+            and resolve_command("/betx") == (None, None)
+            and resolve_command("/bet1 A") == (None, None))
+
+    # ② 参数白名单真值表
+    _bp = bet_parse_args
+    t.check("/bet 参数白名单：合法形态全过（含全角空格与 1/2 别名）",
+            _bp("")[0] == "list" and _bp("我的") == ("mine", None)
+            and _bp("排行") == ("rank", None) and _bp("规则") == ("rules", None)
+            and _bp("1 A") == ("pick", (1, "A")) and _bp("99 b") == ("pick", (99, "B"))
+            and _bp("1 2") == ("pick", (1, "B")) and _bp(" 1  a ") == ("pick", (1, "A"))
+            and _bp("\u30001\u3000A") == ("pick", (1, "A")))
+    t.check("/bet 参数白名单：非法形态全拒（一条不漏）",
+            all(_bp(x)[0] == "bad" for x in
+                ("1 C", "0 A", "100 A", "01 A", "-1 A", "1", "1 A B", "x",
+                 "1A", "我的 1", "a b", "1 a b")))
+
+    # ③ 封盘线公式
+    def _bclose(bo, ts=1000, **kw):
+        e = dict(_esb)
+        e.update(kw)
+        return bet_close_ts({"bo": bo, "ts": ts}, e)
+
+    t.check("封盘线公式：Bo1/Bo3/Bo5 = est + grace − 15 分",
+            _bclose("Bo1") == 1000 + 50 * 60 - 15 * 60
+            and _bclose("Bo3") == 1000 + 100 * 60 - 15 * 60
+            and _bclose("Bo5") == 1000 + 170 * 60 - 15 * 60)
+    t.check("封盘线永远晚于开赛（配置改成 0/超大也不会压到开赛前）",
+            all(_bclose(bo, bet_close_before_grace_minutes=m) > 1000
+                for bo in ("Bo1", "Bo3", "Bo5") for m in (0, 15, 60, 999)))
+    t.check("认不出的赛制按 Bo3 兜底（与 _settle_seconds 同一张表）",
+            _bclose("Bo9") == 1000 + 100 * 60 - 15 * 60)
+
+    # ④ 状态机真值表
+    _now_at = lambda ts: datetime.fromtimestamp(ts, CST)
+    _itb = {"teams": ["A", "B"], "ts": 1000, "bo": "Bo3"}
+    t.check("状态机：未开放 → 开放 → 已封盘（边界取开/取闭都对）",
+            bet_round_state(_itb, _now_at(999), _esb) == "upcoming"
+            and bet_round_state(_itb, _now_at(1000), _esb) == "open"
+            and bet_round_state(_itb, _now_at(1000 + 85 * 60 - 1), _esb) == "open"
+            and bet_round_state(_itb, _now_at(1000 + 85 * 60), _esb) == "closed")
+    t.check("⚑ 状态机：status 判定永远优先于时间（reported 在开赛前也是 settled）",
+            bet_round_state(dict(_itb, status="reported"), _now_at(1), _esb) == "settled"
+            and bet_round_state(dict(_itb, status="abandoned"), _now_at(1), _esb) == "cancelled"
+            and bet_round_state(dict(_itb, status="pending"), _now_at(1), _esb) == "upcoming")
+
+    # ⑤⑥⑦⑨⑩⑪ 结算幂等 / 判名 / 重试上限 / 崩溃恢复 / 过期作废
+    # 全部用临时文件，绝不碰真实 state_bets.json。
+    # ⚠️ 种子 round 的键必须用 `_bet_key` 现算 —— `_teams_key` 会**排序**队名，
+    #    手写 "vitality|navi|1000" 对不上真正的 "navi|vitality|1000"。
+    _SEED_KEY = _bet_key({"teams": ["Vitality", "NAVI"], "ts": 1000})
+    _seed_rounds = {
+        _SEED_KEY: {
+            "group": "1056302577", "teams": ["Vitality", "NAVI"], "ts": 1000,
+            "bo": "Bo3", "tour": "", "close_ts": 1000 + 85 * 60,
+            "bets": [{"uid": "123", "nick": "群友A", "pick": "A",
+                      "pick_team": "Vitality", "at": 1001, "changed": 0},
+                     {"uid": "456", "nick": "群友B", "pick": "B",
+                      "pick_team": "NAVI", "at": 1002, "changed": 0}],
+            "settled": None}}
+
+    def _seed_bets(path):
+        for _p in (path, path + ".tmp", path + ".lock"):
+            with contextlib.suppress(OSError):
+                os.remove(_p)
+        update_bets(lambda d: (d["rounds"].update(_seed_rounds), True)[1], path)
+
+    _item_rep = {"teams": ["Vitality", "NAVI"], "ts": 1000, "bo": "Bo3",
+                 "status": "reported", "winner": "Vitality", "score": "2:1"}
+
+    _bf = os.path.join(tempfile.gettempdir(), "bets_selftest_%d.json" % os.getpid())
+    try:
+        _seed_bets(_bf)
+        _r1, _need1 = _bet_settle_one(None, _esb, _item_rep, _now_at(99999), _bf)
+        t.check("结算：有人押过 → 记一轮、加分、标记待发消息",
+                _need1 and _r1 is not None
+                and load_bets(_bf)["users"]["123"]["pts"] == 1
+                and load_bets(_bf)["users"]["456"]["pts"] == 0)
+        # 发过开奖之后再对账：必须幂等（分不加、消息不重发）
+        _bet_announce_round(None, dict(_esb, bet_dry_run=True), _r1, _bf)
+        _r2, _need2 = _bet_settle_one(None, _esb, _item_rep, _now_at(99999), _bf)
+        t.check("⚑ 结算幂等：发过开奖后再对账，分不加、消息不重发",
+                _need2 is False and _r2 is None
+                and load_bets(_bf)["users"]["123"]["pts"] == 1
+                and load_bets(_bf)["users"]["123"]["hits"] == 1
+                and load_bets(_bf)["users"]["123"]["total"] == 1)
+        t.check("winner 匹配：精确 + 写法漂移 + 顺序被翻都算中；空/对不上不判中",
+                _bet_pick_hits({"pick": "A", "pick_team": "Vitality"},
+                               "Vitality", ["Vitality", "NAVI"]) is True
+                and _bet_pick_hits({"pick": "A", "pick_team": "Vitality"},
+                                   "Team Vitality", ["Vitality", "NAVI"]) is True
+                and _bet_pick_hits({"pick": "A", "pick_team": "写错的队名"},
+                                   "Vitality", ["Vitality", "NAVI"]) is True
+                and _bet_pick_hits({"pick": "B", "pick_team": "NAVI"},
+                                   "NAVI", ["NAVI", "Vitality"]) is True
+                and _bet_pick_hits({"pick": "A", "pick_team": "Vitality"},
+                                   "", ["Vitality", "NAVI"]) is False
+                and _bet_pick_hits({"pick": "A", "pick_team": "Vitality"},
+                                   "NAVI", ["Vitality", "NAVI"]) is False)
+    finally:
+        for _p in (_bf, _bf + ".tmp", _bf + ".lock"):
+            with contextlib.suppress(OSError):
+                os.remove(_p)
+
+    # 无法判名：winner 与两个队名都对不上 → 明说作废、不加分（终局 4）
+    _bf2 = os.path.join(tempfile.gettempdir(), "bets_selftest2_%d.json" % os.getpid())
+    try:
+        _seed_bets(_bf2)
+        _r3, _need3 = _bet_settle_one(
+            None, _esb, dict(_item_rep, winner="Typo Team"), _now_at(99999), _bf2)
+        t.check("无法判名：winner 与两个队名都对不上 → 明说作废、不加分",
+                _need3 and _r3["settled"]["void_reason"] == "undecidable"
+                and not (load_bets(_bf2).get("users") or {}))
+    finally:
+        for _p in (_bf2, _bf2 + ".tmp", _bf2 + ".lock"):
+            with contextlib.suppress(OSError):
+                os.remove(_p)
+
+    # 开奖消息重试上限 + 崩溃恢复路径（发送必然失败：通道名不存在）
+    _esb3 = dict(_esb, bet_announce_max_tries=3, bet_dry_run=False)
+    _bf3 = os.path.join(tempfile.gettempdir(), "bets_selftest3_%d.json" % os.getpid())
+    _bf4 = os.path.join(tempfile.gettempdir(), "bets_selftest4_%d.json" % os.getpid())
+    try:
+        _seed_bets(_bf3)
+        _rr, _ = _bet_settle_one(None, _esb3, _item_rep, _now_at(99999), _bf3)
+        for _i in range(5):
+            _bet_announce_round({"channels": ["no-such-channel"]}, _esb3, _rr, _bf3)
+        _d3 = load_bets(_bf3)["rounds"][_SEED_KEY]["settled"]
+        t.check("开奖消息重试上限：超限后放弃（announced=True），不无限重发",
+                _d3["announced"] is True and _d3["announce_tries"] >= 3)
+        # 崩溃恢复：settled 已写、announced 未写 → 下一轮对账补发且不重复加分
+        _seed_bets(_bf4)
+        _rr4, _need4 = _bet_settle_one(None, _esb3, _item_rep, _now_at(99999), _bf4)
+        t.check("崩溃恢复：settled 已写、announced 未写 → 对账识别为待发消息",
+                _need4 and load_bets(_bf4)["rounds"][_SEED_KEY]
+                ["settled"]["announced"] is False)
+        _rr5, _need5 = _bet_settle_one(None, _esb3, _item_rep, _now_at(99999), _bf4)
+        t.check("⚑ 恢复路径：下一轮对账重新发出开奖且不重复加分",
+                _need5 is True and _rr5 is not None
+                and load_bets(_bf4)["users"]["123"]["pts"] == 1)
+    finally:
+        for _p in (_bf3, _bf4):
+            for _q in (_p, _p + ".tmp", _p + ".lock"):
+                with contextlib.suppress(OSError):
+                    os.remove(_q)
+
+    # 过期作废 vs 未到寿不作废（判据与 _prune_pending 同源）
+    _bf5 = os.path.join(tempfile.gettempdir(), "bets_selftest5_%d.json" % os.getpid())
+    _bf6 = os.path.join(tempfile.gettempdir(), "bets_selftest6_%d.json" % os.getpid())
+    try:
+        _seed_bets(_bf5)
+        bet_reconcile(None, dict(_esb, bet_enabled=True), items=[], path=_bf5)
+        t.check("过期作废：清单里已没有且超过 36h → 静默作废、不加分",
+                load_bets(_bf5)["rounds"][_SEED_KEY]["settled"]
+                ["void_reason"] == "expired"
+                and not (load_bets(_bf5).get("users") or {}))
+        # 反例：清单里没有、但 ts 还在 36h 内 → 不作废（可能只是这轮没带上它）
+        _fresh_ts = int(datetime.now(CST).timestamp()) - 3600
+        _FRESH_KEY = _bet_key({"teams": ["Fresh", "Fresh2"], "ts": _fresh_ts})
+        _seed_rounds[_FRESH_KEY] = {
+            "group": "1056302577", "teams": ["Fresh", "Fresh2"], "ts": _fresh_ts,
+            "bo": "Bo3", "tour": "", "close_ts": _fresh_ts + 85 * 60,
+            "bets": [{"uid": "789", "nick": "群友C", "pick": "A",
+                      "pick_team": "Fresh", "at": _fresh_ts, "changed": 0}],
+            "settled": None}
+        _seed_bets(_bf6)
+        bet_reconcile(None, dict(_esb, bet_enabled=True), items=[], path=_bf6)
+        t.check("未到寿不清扫：清单里没有但 ts 还在 36h 内 → 继续等，不作废",
+                load_bets(_bf6)["rounds"][_FRESH_KEY].get("settled") is None)
+    finally:
+        _seed_rounds.pop(_FRESH_KEY, None)
+        for _p in (_bf5, _bf6):
+            for _q in (_p, _p + ".tmp", _p + ".lock"):
+                with contextlib.suppress(OSError):
+                    os.remove(_q)
+
+    # ⑧ 昵称净化（🔴 CQ 注入面，BET_PLAY.md 坑 1）
+    t.check("🔴 昵称净化：CQ 码/控制字符剥掉、超长截断、空值兜底",
+            _safe_nick("[CQ:at,qq=all]") == "群友"
+            and _safe_nick("a[CQ:at,qq=all]b") == "ab"
+            and "CQ:" not in _safe_nick("[CQ:image,file=x]坏[CQ:at,qq=all]")
+            and _safe_nick("x" * 30) == "x" * 12
+            and _safe_nick(None) == "群友"
+            and _safe_nick("a\x00b\x1fc") == "abc")
+
+    # ⑥⑦ 结构断言：零网络 + 锁纪律 + 不碰水位线那一套
+    _bet_fns = ("cmd_handle_bet", "_bet_place_body", "_bet_list_body",
+                "_bet_mine_body", "_bet_rank_body", "bet_reconcile",
+                "_bet_settle_one", "_bet_announce_round", "update_bets")
+    _net_syms = ("http_request", "fetch_matches", "cito_get", "onebot_api",
+                 "parse_gate", "get_rank", "extract_html", "parse_matches",
+                 "attach_maps", "attach_cito_players")
+    _bet_net = sorted({"%s→%s" % (f, n) for f in _bet_fns
+                       for n in _net_syms if n in _call_names(_fn_def(f))})
+    t.check("⚑ 结构：/bet 全路径零网络（一个抓取符号都不许出现）",
+            not _bet_net, _bet_net)
+    t.check("⚑ 结构：update_bets 用 file_lock（独立 .lock 文件，锁内重读-应用-写回）",
+            "file_lock" in _call_names(_fn_def("update_bets")))
+    t.check("结构：/bet 状态文件是 state_* 形态（.gitignore 与 pack_deploy 双守卫）",
+            os.path.basename(BETS_STATE_FILE).startswith("state_")
+            and BETS_STATE_FILE.endswith(".json"))
+    _wm_syms = ("load_wm", "save_wm", "wm_init", "wm_pending", "wm_advance",
+                "wm_after_handle", "wm_reset_detected")
+    _bet_wm = sorted({"%s→%s" % (f, n) for f in _bet_fns
+                      for n in _wm_syms if n in _call_names(_fn_def(f))})
+    t.check("⚑ 结构：/bet 不碰水位线那一套（首跑不重放/序号重置行为零变化）",
+            not _bet_wm, _bet_wm)
+
+    # ⑫ 冷却键 / 规则文案 / 端到端（dry-run）
+    t.check("/bet 冷却键按用户维度（别人的下注不会被全群冷却吞掉）",
+            _cmd_cooldown_key(CMD_BET, "99", {"sender": {"user_id": "777"}})
+            == "99|bet|777"
+            and _cmd_cooldown_key(CMD_SCHEDULE, "99", {}) == "99|/赛事")
+    t.check("/bet 冷却与 cmd_cooldown_seconds 解耦（5 秒 vs 30 秒）",
+            int(_esb.get("bet_cooldown_seconds")) == 5
+            and int(_esb.get("cmd_cooldown_seconds")) == 30)
+    t.check("bet_enabled 默认 false（关着 = 一行功能路径都不走）",
+            _esb.get("bet_enabled") is False)
+    t.check("规则文案按配置现算（改封盘线不会说谎）",
+            "Bo1 +35 分" in bet_rules_text(_esb)
+            and "Bo3 +85 分" in bet_rules_text(_esb)
+            and "Bo5 +155 分" in bet_rules_text(_esb)
+            and "Bo3 +70 分" in bet_rules_text(
+                dict(_esb, bet_close_before_grace_minutes=30)))
+    _cfg_dry = {"channels": ["console"]}
+    _es_dry = dict(_esb, bet_enabled=True, bet_dry_run=True)
+    _mbet = {"message": "[CQ:at,qq=1] /bet", "group_id": "99", "real_seq": 7,
+             "time": 1, "message_id": 42,
+             "sender": {"user_id": "777", "card": "群友A"}}
+    _out, _wm = handle_cmd_message(_cfg_dry, _es_dry, wm_init([_mbet]),
+                                   _mbet, "99", "1", 30, 1000.0)
+    t.check("/bet 端到端（dry-run）：认命令 → 回复 → 水位线原地不动（推进在 listen_tick）",
+            _out == "ok" and _wm["last_seq"] == 7
+            and _wm["cooldown"].get("99|bet|777") == 1000.0)
+    _mnoat = dict(_mbet, message="/bet")     # 没 @ 机器人
+    _out2, _wm2 = handle_cmd_message(_cfg_dry, _es_dry, wm_init([_mnoat]),
+                                     _mnoat, "99", "1", 30, 1000.0)
+    t.check("没 @ 机器人的 /bet 不响应（skip，不误触发）", _out2 == "skip")
+    _out3, _wm3 = handle_cmd_message(_cfg_dry, dict(_esb), wm_init([_mbet]),
+                                     _mbet, "99", "1", 30, 1000.0)
+    t.check("bet_enabled=false 时 /bet 回一句「未开启」而不是静默",
+            _out3 == "ok")
+
     return t.done("selftest")
 
 
@@ -7432,6 +7747,9 @@ def selftest():
 # 命令字面量。判定是「剥掉所有 CQ 码 → strip() → **整条恰好等于**」，
 # **绝不做子串匹配**（否则「我觉得 /赛事 不错」这种闲聊也会触发）。
 CMD_SCHEDULE = "/赛事"
+# 群内趣味竞猜的命令字面量。它**带参数**（`/bet 1 A`），所以不走精确匹配那条路，
+# 而是 `resolve_command` 里的前缀分支 —— 参数由 `bet_parse_args` 过白名单。
+CMD_BET = "/bet"
 
 # 命令表：{命令: 处理函数}。**加命令只需在这张表里加一行** ——
 # 处理函数签名 (cfg, es, msg, now) -> bool（返回是否**真的回复出去了**）。
@@ -7488,14 +7806,33 @@ def is_at_bot(message, bot_qq):
     return ("[CQ:at,qq=%s]" % qq) in message_to_cq(message)
 
 
-def parse_command(message):
-    """从一条消息里认出命令；认不出返回 None。
+def resolve_command(message):
+    """认出命令，返回 `(命令, 参数)`；认不出返回 `(None, None)`。
+
+    两条路径（2026-10-12 从「只有第一条」扩展而来，`/赛事` 的行为零变化）：
+
+      · **精确匹配**（`/赛事`）：剥 CQ 码 → `strip()` → 整条恰好等于注册表里的键。
+        **绝不做子串匹配**（否则「我觉得 /赛事 不错」这种闲聊也会触发）。
+      · **前缀匹配**（`/bet`）：首 token 等于 `/bet`，其后是参数（`/bet 1 A`）。
+        参数由 `bet_parse_args` 过白名单；白名单外的形态回一句用法提示，
+        **不静默吞掉** —— 带参数的命令必须给反馈，否则用户不知道错在哪。
 
     `[CQ:reply,id=...]`（引用一条旧消息再 @ 机器人）也会被一起剥掉 ——
     否则被引用的旧内容会混进判定，表现为「明明 @ 了却毫无反应」（文档坑 5）。
     """
     text = strip_cq(message_to_cq(message)).strip()
-    return text if text in CMD_REGISTRY else None
+    if text in CMD_REGISTRY:
+        return text, None
+    head, _, rest = text.partition(" ")
+    if head == CMD_BET:
+        return CMD_BET, rest
+    return None, None
+
+
+def parse_command(message):
+    """只取命令字面量（参数从略）—— 保留这个签名给自检与将来的路由用。"""
+    cmd, _rest = resolve_command(message)
+    return cmd
 
 
 def _msg_id(m):
@@ -7795,14 +8132,17 @@ def handle_cmd_message(cfg, es, wm, msg, group, bot_qq, cooldown_s, now_ts):
     `now_ts` 是**墙钟秒**（给冷却用）；渲染要用的北京时间由调用方另算。
     """
     raw = msg.get("message")
-    cmd = parse_command(raw)
+    cmd, _rest = resolve_command(raw)
     if not cmd:
         return "skip", wm            # 不是命令
     if not is_at_bot(raw, bot_qq):
         return "skip", wm            # 是命令但没 @ 机器人 —— 不响应（避免误触发）
-    key = "%s|%s" % (group, cmd)
-    if not wm_cooldown_ok(wm, key, now_ts, cooldown_s):
-        log("[info] 冷却中（%s 秒内已响应过），忽略 %s" % (cooldown_s, cmd))
+    key = _cmd_cooldown_key(cmd, group, msg)
+    # /bet 用自己的冷却值（零网络，5 秒按用户）；其余命令用 cmd_cooldown_seconds。
+    cd = (max(0, int(es.get("bet_cooldown_seconds") or 5))
+          if cmd == CMD_BET else cooldown_s)
+    if not wm_cooldown_ok(wm, key, now_ts, cd):
+        log("[info] 冷却中（%s 秒内已响应过），忽略 %s" % (cd, cmd))
         return "skip", wm
     handler = CMD_REGISTRY.get(cmd)
     if handler is None:
@@ -7926,6 +8266,755 @@ def run_listen(cfg, args):
             log("[warn] 轮询一轮出错（%s: %s），%d 秒后继续"
                 % (type(exc).__name__, exc, poll))
         time.sleep(poll)
+
+
+# ==========================================================================
+# 群内趣味竞猜（@ 机器人 · /bet）
+# ==========================================================================
+# 设计文档：`deploy/BET_PLAY.md`（**唯一权威**：命令语法 / 封盘线公式 / 状态机 /
+# 结算对账 / 25 条边界 / 12 条断言）。这里只写实现，为什么这么做全在文档里。
+#
+# 一句话：群友在比赛**开赛后**（登记 ts）到**封盘线**（ts + grace − 15 分钟）之间
+# 对胜者下注；结果由既有战果结算管线判定（**零新增抓取**），猜中 +1 分。
+#
+# 三条纪律（每条都有自检断言钉着，见 selftest 的「/bet 竞猜」一节）：
+#   ① **零网络**：`/bet` 任何子命令都不抓 Liquipedia、不调 Cito —— 可下注列表直接读
+#      `state_results_pending.json`。铁律「绝不在持有状态锁时联网」结构上成立。
+#   ② **结算是对账，不是回调**：在 `run_results` 末尾幂等扫描，绝不在判定 reported
+#      的那一刻顺手结算（崩溃缺口：reported 落盘后进程被杀 → 下轮跳过该场 →
+#      竞猜永不结算且无任何报错，BET_PLAY.md §6.1）。
+#   ③ **pick 存队名快照**：`absorb_result` 会用结果页的写法改写 teams 的顺序与措辞，
+#      只存 A/B 会在顺序被翻时**系统性判反**且无报错（BET_PLAY.md §5.3）。
+
+BET_USAGE = "用法：/bet 看列表 · /bet 1 A 下注 · /bet 我的 · /bet 排行 · /bet 规则"
+
+# 封盘线的下限：绝不允许早于「开赛 + 10 分钟」。配置被改成极大值时
+# （bet_close_before_grace_minutes=999），没有这道钳制就会出现
+# 「未开放」直接变「已封盘」—— 竞猜静默失效且毫无报错。
+BET_CLOSE_FLOOR_SECONDS = 600
+
+_CN_IDX = "①②③④⑤⑥⑦⑧⑨⑩⑪⑫⑬⑭⑮⑯⑰⑱⑲⑳"
+_BET_NUM_RE = re.compile(r"^[1-9][0-9]?$")
+# 选项归一：1→A、2→B（下注快，A/B 才是回显口径）。
+_BET_PICK_MAP = {"1": "A", "2": "B", "A": "A", "B": "B"}
+
+
+def _cn_idx(i):
+    """列表行号。超过 ⑳ 退化到 "21." 形态（配置把 bet_max_list_rows 调大时用）。"""
+    return _CN_IDX[i - 1] if 1 <= i <= len(_CN_IDX) else "%d." % i
+
+
+def _clip(s, limit=12):
+    """队名/昵称截断（列表一行放不下全名，战报里也这么干）。"""
+    s = (s or "").strip()
+    return s if len(s) <= limit else s[:limit]
+
+
+def _bet_pair(item):
+    return " vs ".join(_clip(t) for t in list(item.get("teams") or [])[:2]) or "?"
+
+
+def _bet_hm(ts, now):
+    """HH:MM，跨天加「次日 / N 天后」（预告窗口最长 24h，实际只见「次日」）。"""
+    d = datetime.fromtimestamp(int(ts or 0), CST)
+    delta = (d.date() - now.date()).days
+    pre = "次日 " if delta == 1 else ("%d 天后 " % delta if delta > 1 else "")
+    return "%s%s" % (pre, d.strftime("%H:%M"))
+
+
+def _pick_team_name(item, pick):
+    teams = list(item.get("teams") or [])[:2]
+    i = 0 if pick == "A" else 1
+    return _clip(teams[i]) if len(teams) > i else "?"
+
+
+# ---- 状态文件：读改写助手（与 update_pending 完全同构）----
+
+def load_bets(path=BETS_STATE_FILE):
+    """读竞猜状态。文件不存在/读坏 → 全新空状态（命令路径绝不能因此崩）。"""
+    if os.path.exists(path):
+        try:
+            with open(path, "r", encoding="utf-8") as fp:
+                data = json.load(fp)
+            if isinstance(data, dict):
+                data.setdefault("version", 1)
+                data.setdefault("rounds", {})
+                data.setdefault("users", {})
+                return data
+        except (OSError, json.JSONDecodeError):
+            pass
+    return {"version": 1, "rounds": {}, "users": {}}
+
+
+def save_bets(data, path=BETS_STATE_FILE):
+    """原子写（tmp + rename）。⚠️ 原子写 ≠ 并发安全，单条读改写必须走 update_bets。"""
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as fp:
+        json.dump(data, fp, ensure_ascii=False, indent=2)
+    os.replace(tmp, path)
+
+
+def update_bets(apply_fn, path=BETS_STATE_FILE):
+    """在**排他锁**里做一次「重读 → apply_fn(data) → 写回」。返回写回的数据。
+
+    约定与 `update_pending` 一致：
+      · `apply_fn` **只做内存操作** —— 绝不联网/发消息（本模块零网络，结构上成立）；
+      · 返回 dict/True → 写回；返回 None/False → 无变化、不写盘。
+    注意返回值是**整个 data**，不是 apply_fn 的返回值 —— 需要「apply 干了什么」
+    的调用方用一个可变 cell 传出来（见 `_bet_place_body` / `_bet_settle_one`）。
+    """
+    with file_lock(path):
+        data = load_bets(path)
+        out = apply_fn(data)
+        if out is None or out is False:
+            return data
+        if out is True:
+            out = data
+        save_bets(out, path)
+        return out
+
+
+# ---- 键、时间窗、状态机（全是纯函数）----
+
+def _bet_key(item):
+    """竞猜回合键 = (队名规范键, 登记 ts) 的字符串形态 —— 与 `_item_ident` 同源。"""
+    return "%s|%d" % (_teams_key(item.get("teams")), int(item.get("ts") or 0))
+
+
+def bet_close_ts(item, es):
+    """封盘线 = est + grace(bo) − bet_close_before_grace_minutes（秒）。
+
+    锚在 grace（机器人自己开始抓结果的时刻）往前退，而不是「预计结束时刻」：
+    后者会让一场 70 分钟就 2:0 的 Bo3 在赛果公开 65 分钟后还收注（BET_PLAY.md §3.4）。
+    """
+    ts = int(item.get("ts") or 0)
+    grace_s, _timeout_s = _settle_seconds(item.get("bo"), es)
+    before = max(0, int(es.get("bet_close_before_grace_minutes") or 0)) * 60
+    return max(ts + grace_s - before, ts + BET_CLOSE_FLOOR_SECONDS)
+
+
+def bet_round_state(item, now, es):
+    """竞猜回合状态（纯函数，不落盘、不读 bets 文件）。
+
+    ⚠️ 判定顺序即语义：**status 永远在时间之前** —— reported/abandoned 的场次
+    哪怕时钟回到开赛前也一律不接受下注（BET_PLAY.md §3.5 硬兜底）。
+    """
+    status = (item.get("status") or "").strip()
+    if status == "reported":
+        return "settled"
+    if status == "abandoned":
+        return "cancelled"
+    t = now.timestamp()
+    if t < int(item.get("ts") or 0):
+        return "upcoming"
+    if t < bet_close_ts(item, es):
+        return "open"
+    return "closed"
+
+
+# ---- 参数解析（白名单）----
+
+def bet_parse_args(rest):
+    """解析 `/bet` 后面的参数。返回 `(kind, payload)`；白名单外 kind="bad"。
+
+    kind ∈ list / mine / rank / rules / pick / bad。
+    全角空格和制表符先归一成半角空格（QQ 输入法常带全角空格，不归一会让
+    「/bet　1　A」莫名其妙地失败）。多空格折叠成一个。
+    """
+    text = (rest or "").replace("\u3000", " ").replace("\t", " ")
+    text = re.sub(r" +", " ", text).strip()
+    if not text:
+        return "list", None
+    if text in ("我的", "排行", "规则"):
+        return {"我的": "mine", "排行": "rank", "规则": "rules"}[text], None
+    toks = text.split(" ")
+    if (len(toks) == 2 and _BET_NUM_RE.match(toks[0])
+            and toks[1].upper() in _BET_PICK_MAP):
+        return "pick", (int(toks[0]), _BET_PICK_MAP[toks[1].upper()])
+    return "bad", None
+
+
+def bet_rules_text(es):
+    """规则说明。封盘线按**当前配置**现算 —— 写死数字的话改配置就会说谎。"""
+    before = max(0, int(es.get("bet_close_before_grace_minutes") or 0))
+    pts = max(0, int(es.get("bet_points_per_hit") or 1))
+
+    def _off(bo):
+        grace_s, _t = _settle_seconds(bo, es)
+        return int(round(grace_s / 60.0)) - before
+
+    return "\n".join([
+        "【CS2 竞猜规则】",
+        "· 下注窗口：开赛（按预告登记的开赛时间）→ 封盘线，封盘后停止下注",
+        "· 封盘线（开赛后）：Bo1 +%d 分 / Bo3 +%d 分 / Bo5 +%d 分"
+        % (_off("Bo1"), _off("Bo3"), _off("Bo5")),
+        "· 猜中 +%d 分；封盘前可随时改单；弃赛/取消的场次竞猜作废" % pts,
+        "· 命令：/bet 看列表 · /bet 我的 · /bet 排行 · /bet 规则",
+    ])
+
+
+# ---- 昵称净化与发送者（🔴 CQ 注入面，见 BET_PLAY.md 坑 1）----
+
+def _safe_nick(name, limit=12):
+    """群名片净化后才允许回显。
+
+    名片是**用户可控字符串**：任何人把名片写成 `[CQ:at,qq=all]`，机器人回显时
+    就等于替他去 @ 全体。所以剥 CQ 码、去控制字符、截断，三步都做，
+    之后才允许进入任何回复文本。
+    """
+    text = _CQ_RE.sub("", str(name or ""))
+    text = "".join(ch for ch in text if 32 <= ord(ch) != 127)
+    text = text.strip()
+    if len(text) > limit:
+        text = text[:limit]
+    return text or "群友"
+
+
+def _msg_sender(m):
+    """(uid, 净化后的昵称)。群名片优先于昵称 —— 群里看到的是名片。"""
+    s = (m or {}).get("sender") or {}
+    if not isinstance(s, dict):
+        s = {}
+    uid = str(s.get("user_id") or (m or {}).get("user_id") or "").strip()
+    nick = s.get("card") or s.get("nickname") or ""
+    return uid, _safe_nick(nick)
+
+
+def _cmd_cooldown_key(cmd, group, msg):
+    """冷却键。`/bet` 是第一个**按用户**维度的命令族（键 = 群号|bet|uid）。
+
+    全群冷却（群号|命令）会把别人在窗内的下注**静默吞掉**：skip → 水位线推进，
+    消息真丢了。6 人群里俩人在封盘前 3 秒同时下注是大概率事件（BET_PLAY.md §9.2）。
+    """
+    if cmd == CMD_BET:
+        return "%s|bet|%s" % (group, _msg_sender(msg)[0] or "0")
+    return "%s|%s" % (group, cmd)
+
+
+# ---- 发送（命令回复带 reply 前缀；主动消息不带）----
+
+def _bet_send(cfg, es, body):
+    """发一条群消息。返回是否真送达。dry-run 只落日志、不进群。"""
+    if es.get("bet_dry_run"):
+        log("[bet][dry-run] 本应发送：%s" % body.replace("\n", " / "))
+        return True
+    try:
+        notifiers = watch.build_notifiers(cfg)
+        delivered, failed = send_with_retry(notifiers, body, es)
+    except Exception as exc:  # noqa: BLE001
+        log("[warn] 竞猜消息发送出错（%s: %s）" % (type(exc).__name__, exc))
+        return False
+    if not delivered or failed:
+        log("[warn] 竞猜消息发送失败（%s）" % ("、".join(failed) or "未知"))
+        return False
+    return True
+
+
+def _bet_reply(cfg, es, msg, body):
+    """回一条命令响应（`[CQ:reply]` 前缀，群里看得出是回哪条）。
+
+    返回 False = 没发出去 → 调用方返回 False → 水位线不推进、下轮重试
+    （先发后落，绝不静默丢命令）。
+    """
+    reply = "[CQ:reply,id=%s]\n%s" % (_msg_id(msg), body)
+    ok = _bet_send(cfg, es, reply)
+    if not ok:
+        log("[warn] /bet 回复没发出去 —— 水位线不推进，下轮重试")
+    return ok
+
+
+# ---- 列表 / 我的 / 排行 ----
+
+def _bet_visible(items, now, es):
+    """可下注列表：open/upcoming 按 ts 升序在前，其余按 ts 降序垫后。
+
+    垫后是为了第 ①② 行永远指向当下最该看到的比赛，不被陈年旧场次挤掉；
+    降序让「最近发生的」排最前。编号对全量生效（调用方按 limit 截断）。
+    """
+    live, past = [], []
+    for it in items or []:
+        st = bet_round_state(it, now, es)
+        (live if st in ("open", "upcoming") else past).append((st, it))
+    live.sort(key=lambda x: int(x[1].get("ts") or 0))
+    past.sort(key=lambda x: int(x[1].get("ts") or 0), reverse=True)
+    return live + past
+
+
+def _bet_my_pick(bets, item, uid):
+    if not uid:
+        return None
+    r = (bets.get("rounds") or {}).get(_bet_key(item)) or {}
+    for b in r.get("bets") or []:
+        if str(b.get("uid")) == uid:
+            return b.get("pick")
+    return None
+
+
+def _bet_row_label(idx, st, it, es, now, my_pick):
+    """列表里的一行（编号 + 时间 + 对阵 + 赛制 + 状态 [+ 我押了谁]）。"""
+    bits = ["%s %s" % (_bet_hm(it.get("ts"), now), _bet_pair(it))]
+    bo = (it.get("bo") or "").strip()
+    if bo:
+        bits.append(bo)
+    if st == "open":
+        bits.append("%s 封盘" % _bet_hm(bet_close_ts(it, es), now))
+    elif st == "upcoming":
+        bits.append("%s 开放" % _bet_hm(it.get("ts"), now))
+    elif st == "closed":
+        bits.append("已封盘")
+    elif st == "settled":
+        sc = (it.get("score") or "").strip()
+        bits.append("已开奖%s" % ((" %s" % sc) if sc else ""))
+    elif st == "cancelled":
+        bits.append("赛事取消")
+    if my_pick:
+        bits.append("你猜了 %s" % my_pick)
+    return "%s %s" % (_cn_idx(idx), " · ".join(bits))
+
+
+def _bet_list_body(items, bets, uid, now, es):
+    limit = max(1, int(es.get("bet_max_list_rows") or 12))
+    rows = _bet_visible(items, now, es)
+    live = [(st, it) for st, it in rows if st in ("open", "upcoming")]
+    if not live:
+        # 没有可下注的：把「下一场什么时候」说出来，免得用户反复问
+        nxt = None
+        for it in items or []:
+            if bet_round_state(it, now, es) == "upcoming":
+                if nxt is None or int(it.get("ts") or 0) < int(nxt.get("ts") or 0):
+                    nxt = it
+        if nxt is None:
+            return "【CS2 竞猜】接下来没有已预告的比赛"
+        return ("【CS2 竞猜】当前没有开放下注的比赛\n下一场：%s（%s 开放，%s 封盘）"
+                % (_bet_pair(nxt), _bet_hm(nxt.get("ts"), now),
+                   _bet_hm(bet_close_ts(nxt, es), now)))
+    lines = ["【CS2 竞猜】可下注 %d 场（开赛后开放）" % len(live)]
+    for i, (st, it) in enumerate(rows[:limit], 1):
+        lines.append(_bet_row_label(i, st, it, es, now, _bet_my_pick(bets, it, uid)))
+    if len(rows) > limit:
+        lines.append("……另有 %d 场已封盘/已开奖，不逐条列出" % (len(rows) - limit))
+    lines.append("下注：/bet 1 A 或 /bet 1 B（A=①主队）")
+    lines.append("我的：/bet 我的 · 排行：/bet 排行 · 规则：/bet 规则")
+    return "\n".join(lines)
+
+
+def _bet_mine_body(items, bets, uid, now, es):
+    u = (bets.get("users") or {}).get(uid) or {}
+    pts = int(u.get("pts") or 0)
+    hits = int(u.get("hits") or 0)
+    total = int(u.get("total") or 0)
+    idx = {_bet_key(it): it for it in items or []}
+    mine = [r for r in (bets.get("rounds") or {}).values()
+            if any(str(b.get("uid")) == uid for b in (r.get("bets") or []))]
+    mine.sort(key=lambda r: int(r.get("ts") or 0), reverse=True)
+    lines = ["【CS2 竞猜】我的 · %d 分（中 %d/%d）" % (pts, hits, total)]
+    if not mine:
+        lines.append("还没有押过注 —— /bet 看当前可下注的比赛")
+        return "\n".join(lines)
+    per_hit = max(0, int(es.get("bet_points_per_hit") or 1))
+    for r in mine[:12]:
+        b = next(x for x in (r.get("bets") or []) if str(x.get("uid")) == uid)
+        when = _bet_hm(r.get("ts"), now)
+        pair = " vs ".join(_clip(t) for t in list(r.get("teams") or [])[:2]) or "?"
+        s = r.get("settled")
+        if s:
+            vr = s.get("void_reason")
+            if vr == "undecidable":
+                st = "作废（胜者名称对不上）"
+            elif vr == "expired":
+                st = "已过期，未开奖"
+            elif _bet_pick_hits(b, s.get("winner_team"), r.get("teams")):
+                st = "猜中 +%d" % per_hit
+            else:
+                st = "猜错"
+        else:
+            it = idx.get(_bet_key(r))
+            st = {"open": "%s 封盘" % _bet_hm(bet_close_ts(it, es), now),
+                  "upcoming": "%s 开放" % _bet_hm(r.get("ts"), now),
+                  "closed": "已封盘，待开奖"}.get(
+                bet_round_state(it, now, es) if it else "closed", "待开奖")
+        lines.append("%s %s · 猜 %s · %s" % (when, pair, b.get("pick"), st))
+    return "\n".join(lines)
+
+
+def _bet_rank_body(bets):
+    users = [u for u in (bets.get("users") or {}).values()
+             if int(u.get("pts") or 0) > 0]
+    # 同分：最近一次得分时间降序（活跃者靠前），再按昵称兜底（稳定输出）。
+    users.sort(key=lambda u: (-int(u.get("pts") or 0),
+                              -float(u.get("last_pts_at") or 0),
+                              _safe_nick(u.get("nick"))))
+    if not users:
+        return "【CS2 竞猜】排行榜\n还没有人猜中过 —— 下一场就是你。"
+    lines = ["【CS2 竞猜】排行榜"]
+    for i, u in enumerate(users[:10], 1):
+        lines.append("%d. %s %d 分（中 %d/%d）"
+                     % (i, _safe_nick(u.get("nick")), int(u.get("pts") or 0),
+                        int(u.get("hits") or 0), int(u.get("total") or 0)))
+    return "\n".join(lines)
+
+
+# ---- 下注 / 改单 ----
+
+def _bet_find_bet(bets, item, uid):
+    r = (bets.get("rounds") or {}).get(_bet_key(item)) or {}
+    for b in r.get("bets") or []:
+        if str(b.get("uid")) == uid:
+            return b, r
+    return None, r
+
+
+def _bet_verdict(bets, item, uid):
+    """这一场对这个用户的结局：None（没押/未结算）/ hit / miss / void。"""
+    b, r = _bet_find_bet(bets, item, uid)
+    s = r.get("settled") if b else None
+    if not b or not s:
+        return None
+    if s.get("void_reason"):
+        return "void"
+    return "hit" if _bet_pick_hits(b, s.get("winner_team"), r.get("teams")) else "miss"
+
+
+def _bet_place_body(cfg, es, msg, now, idx, pick):
+    """下注/改单主体。返回要回复的文本（发送由调用方做）。
+
+    🔴 封盘的时间判定在**锁内**重做（`_apply` 里）：锁外判定再锁内写 = 没判定，
+    21:24:59.9 的请求能贴着封盘线写进去（BET_PLAY.md 边界 2）。
+    """
+    items = (load_results_pending().get("items") or [])
+    limit = max(1, int(es.get("bet_max_list_rows") or 12))
+    rows = _bet_visible(items, now, es)[:limit]
+    uid, nick = _msg_sender(msg)
+    if not rows:
+        return "当前没有可下注的比赛 —— /bet 看列表"
+    if idx > len(rows):
+        # 提示只列**真正可下注**的行号 —— 把已封盘/已开奖的行号也列出来会误导
+        live_idx = [i for i, (s2, _it) in enumerate(rows, 1)
+                    if s2 in ("open", "upcoming")]
+        vis = "".join(_cn_idx(i) for i in live_idx) or "（当前没有可下注的场次）"
+        return "没有编号 %s。可下注：%s" % (_cn_idx(idx), vis)
+    st, item = rows[idx - 1]
+    if st == "settled":
+        bets = load_bets()
+        v = _bet_verdict(bets, item, uid)
+        sc = (item.get("score") or "").strip()
+        tail = {"hit": "，你猜对了 +%d 分" % max(0, int(es.get("bet_points_per_hit") or 1)),
+                "miss": "，你猜错了", "void": "，本轮竞猜作废"}.get(v, "")
+        return "%s 已开奖：%s%s%s" % (_cn_idx(idx), _bet_pair(item),
+                                    (" %s" % sc) if sc else "", tail)
+    if st == "cancelled":
+        return ("%s 赛事取消/延期，本场不下注（若次日补齐赛果会自动开奖）"
+                % _cn_idx(idx))
+    if st == "upcoming":
+        return ("还没开售：%s %s 开放下注，届时再来"
+                % (_cn_idx(idx), _bet_hm(item.get("ts"), now)))
+    if st == "closed":
+        return ("%s 已封盘（%s 停止下注）—— 赛果稍后开奖"
+                % (_cn_idx(idx), _bet_hm(bet_close_ts(item, es), now)))
+    # st == "open"：锁内下注
+    close_ts = bet_close_ts(item, es)
+    cell = {}
+
+    def _apply(data):
+        if now.timestamp() >= close_ts:
+            cell["late"] = True
+            return None
+        rounds = data.setdefault("rounds", {})
+        key = _bet_key(item)
+        r = rounds.get(key)
+        if r is None:
+            # 懒创建：没人押过的比赛在状态文件里不存在（BET_PLAY.md §5.2）
+            r = {"group": str((msg or {}).get("group_id") or ""),
+                 "teams": list(item.get("teams") or [])[:2],
+                 "ts": int(item.get("ts") or 0),
+                 "bo": item.get("bo") or "",
+                 "tour": item.get("tour") or "",
+                 "close_ts": int(close_ts),
+                 "bets": [], "settled": None}
+            rounds[key] = r
+        old = None
+        for b in r["bets"]:
+            if str(b.get("uid")) == uid:
+                old = b
+                break
+        if old is None:
+            r["bets"].append({"uid": uid, "nick": nick, "pick": pick,
+                              "pick_team": _pick_team_name(item, pick),
+                              "at": int(now.timestamp()), "changed": 0})
+            u = data.setdefault("users", {}).setdefault(
+                uid, {"nick": nick, "pts": 0, "hits": 0, "total": 0,
+                      "last_pts_at": 0})
+            u["nick"] = nick
+            cell["kind"] = "new"
+            return True
+        old["nick"] = nick
+        if old.get("pick") == pick:
+            cell["kind"] = "same"
+            return True
+        old_pick = old.get("pick")
+        old["pick"] = pick
+        old["pick_team"] = _pick_team_name(item, pick)
+        old["changed"] = int(old.get("changed") or 0) + 1
+        cell["kind"] = "changed"
+        cell["old_pick"] = old_pick
+        return True
+
+    update_bets(_apply)
+    if cell.get("late"):
+        return "%s 刚刚封盘，来晚了一步（封盘线 %s）" % (
+            _cn_idx(idx), _bet_hm(close_ts, now))
+    if cell.get("kind") == "new":
+        other = "B" if pick == "A" else "A"
+        return ("已记录 %s：猜 %s 胜（对手 %s）· %s 封盘\n改单：/bet %d %s"
+                % (_cn_idx(idx), _pick_team_name(item, pick),
+                   _pick_team_name(item, other), _bet_hm(close_ts, now),
+                   idx, other))
+    if cell.get("kind") == "same":
+        return ("已记录 %s：猜 %s 胜（没有变化）· %s 封盘"
+                % (_cn_idx(idx), _pick_team_name(item, pick),
+                   _bet_hm(close_ts, now)))
+    old_pick = cell.get("old_pick")
+    return ("已改单 %s：%s → %s · %s 封盘"
+            % (_cn_idx(idx), _pick_team_name(item, old_pick),
+               _pick_team_name(item, pick), _bet_hm(close_ts, now)))
+
+
+def cmd_handle_bet(cfg, es, msg, now):
+    """`/bet`：列表 / 下注 / 改单 / 我的 / 排行 / 规则。返回是否真回复出去了。
+
+    返回值语义（BET_PLAY.md 坑 4）：**确定性拒绝**（未开放/已封盘/编号错/选项错/
+    未开启）都回了消息 → True；只有**发送本身失败**才 False（下轮重试）。
+    绝不对确定性错误返回 False —— 那会让同一条命令每轮重试 cmd_max_attempts 次，
+    白烧发送机会，还可能把后面的命令堵在暂停扫描里。
+    """
+    if not es.get("bet_enabled", False):
+        return _bet_reply(cfg, es, msg, "竞猜功能未开启。")
+    _cmd, rest = resolve_command(msg.get("message"))
+    kind, payload = bet_parse_args(rest)
+    if kind == "bad":
+        return _bet_reply(cfg, es, msg, BET_USAGE)
+    if kind == "rules":
+        return _bet_reply(cfg, es, msg, bet_rules_text(es))
+    if kind == "pick":
+        return _bet_reply(cfg, es, msg,
+                          _bet_place_body(cfg, es, msg, now, payload[0], payload[1]))
+    items = (load_results_pending().get("items") or [])
+    bets = load_bets()
+    uid, _nick = _msg_sender(msg)
+    if kind == "mine":
+        return _bet_reply(cfg, es, msg, _bet_mine_body(items, bets, uid, now, es))
+    if kind == "rank":
+        return _bet_reply(cfg, es, msg, _bet_rank_body(bets))
+    return _bet_reply(cfg, es, msg, _bet_list_body(items, bets, uid, now, es))
+
+
+CMD_REGISTRY[CMD_BET] = cmd_handle_bet
+
+
+# ---- 判定与结算 ----
+
+def _norm_team(name):
+    """队名归一：小写 → 剥 `team `/`fc `/`the ` 前缀（复用 Cito 那张表）→
+    去空白/连字符/点/下划线。比 `_teams_key` 激进两层 —— 要扛住结果页的写法漂移
+    （`Team Vitality` vs `Vitality`，2026-10-09 在 Cito 那边踩过一遍）。"""
+    s = (name or "").strip().lower()
+    for _p in CITO_NAME_PREFIX:
+        if s.startswith(_p):
+            s = s[len(_p):]
+            break
+    return re.sub(r"[\s\-_.]+", "", s)
+
+
+def _bet_pick_hits(bet, winner, teams):
+    """这一注是否猜中。
+
+    `winner` = `absorb_result` 写的胜者名（**结果页**的写法）；
+    `teams` = **下注时**的队名快照 —— 清单里的 teams 会被 absorb_result 改写，
+    顺序可能翻、措辞可能变，所以不能信它（BET_PLAY.md §5.3）。
+    """
+    w = (winner or "").strip()
+    nw = _norm_team(w)
+    if not nw:
+        return False
+    if nw == _norm_team(bet.get("pick_team")):
+        return True
+    try:
+        t = (teams or [])[0 if bet.get("pick") == "A" else 1]
+    except IndexError:
+        return False
+    return bool(t) and nw == _norm_team(t)
+
+
+def _join_nicks(bets, limit=10):
+    names = [_safe_nick(b.get("nick")) for b in bets]
+    if not names:
+        return "（无人）"
+    if len(names) <= limit:
+        return "、".join(names)
+    return "%s 等 %d 人" % ("、".join(names[:limit]), len(names))
+
+
+def _bet_settle_one(cfg, es, item, now, path=BETS_STATE_FILE):
+    """结算一场的竞猜。**幂等**（`settled` 即锁）。返回 `(round, 需不需要发开奖)`。
+
+    需要发消息的两种情况：
+      ① 本轮刚结算（加分 + 标记 + 统计一次写完）；
+      ② 上次结算了但消息没发出去（崩溃恢复：settled 已写、announced 未写）。
+    """
+    pts = max(0, int(es.get("bet_points_per_hit") or 1))
+    key = _bet_key(item)
+    cell = {}
+
+    def _apply(data):
+        r = (data.get("rounds") or {}).get(key)
+        if not r:
+            return None                     # 没人押过 → 无事发生
+        if r.get("settled"):
+            # 已结算：只有「还没发过开奖消息」才算有活干（恢复路径，不写盘）
+            if r["settled"].get("announced"):
+                return None
+            cell["round"] = r
+            return None
+        winner = (item.get("winner") or "").strip()
+        teams = r.get("teams") or []
+        bets = r.get("bets") or []
+        # winner 与两个队名都对不上（写法漂移 / 上游把平局跳过了）→ 明说作废、不加分。
+        # 静默判反比作废危险得多（BET_PLAY.md 终局 4）。
+        undecidable = not winner or not any(
+            _norm_team(winner) == _norm_team(t) for t in teams if t)
+        r["settled"] = {
+            "at": now.strftime("%Y-%m-%d %H:%M:%S"),
+            "winner_team": winner,
+            "score": item.get("score") or "",
+            "void_reason": "undecidable" if undecidable else None,
+            "announced": False,
+            "announce_tries": 0,
+        }
+        if undecidable:
+            cell["round"] = r
+            return True
+        users = data.setdefault("users", {})
+        now_ts = int(now.timestamp())
+        for b in bets:
+            u = users.setdefault(b.get("uid"),
+                                 {"nick": b.get("nick") or "群友", "pts": 0,
+                                  "hits": 0, "total": 0, "last_pts_at": 0})
+            u["total"] = int(u.get("total") or 0) + 1
+            if _bet_pick_hits(b, winner, teams):
+                u["pts"] = int(u.get("pts") or 0) + pts
+                u["hits"] = int(u.get("hits") or 0) + 1
+                u["last_pts_at"] = now_ts
+        cell["round"] = r
+        return True
+
+    update_bets(_apply, path)
+    r = cell.get("round")
+    return r, r is not None
+
+
+def _bet_announce_body(r, es):
+    """开奖消息正文。从 round 重新算（不依赖任何易失状态），所以重发是安全的。"""
+    s = r.get("settled") or {}
+    pair = " vs ".join(_clip(t) for t in list(r.get("teams") or [])[:2]) or "?"
+    if s.get("void_reason") == "undecidable":
+        return ("【CS2 竞猜】%s 本轮竞猜作废\n"
+                "胜者名称与参赛队不一致（页面写法漂移），已记录日志，本轮不计分。"
+                % pair)
+    score = (s.get("score") or "").strip()
+    winner = (s.get("winner_team") or "").strip()
+    bets = r.get("bets") or []
+    correct = [b for b in bets if _bet_pick_hits(b, winner, r.get("teams"))]
+    wrong = [b for b in bets if b not in correct]
+    lines = ["【CS2 竞猜】开奖 · %s%s" % (pair, (" %s" % score) if score else "")]
+    lines.append("猜中 +%d 分：%s"
+                 % (max(0, int(es.get("bet_points_per_hit") or 1)),
+                    _join_nicks(correct)))
+    if wrong:
+        lines.append("惜败：%s" % _join_nicks(wrong))
+    return "\n".join(lines)
+
+
+def _bet_announce_round(cfg, es, r, path=BETS_STATE_FILE):
+    """发开奖消息（**锁外**、尽力）。成功/超限 → 记 announced；失败 → tries+1。"""
+    body = _bet_announce_body(r, es)
+    ok = _bet_send(cfg, es, body)
+    key = _bet_key(r)
+    max_tries = max(1, int(es.get("bet_announce_max_tries") or 5))
+
+    def _apply(data):
+        rr = (data.get("rounds") or {}).get(key)
+        if not rr or not rr.get("settled"):
+            return None
+        if rr["settled"].get("announced"):
+            return None          # 已发过 / 已放弃重发 —— 不再触碰
+        if ok:
+            rr["settled"]["announced"] = True
+            return True
+        tries = int(rr["settled"].get("announce_tries") or 0) + 1
+        rr["settled"]["announce_tries"] = tries
+        if tries >= max_tries:
+            # 放弃重发：分已经入账，/bet 我的 状态正确。宁可少一条群消息，
+            # 也不要每 10 分钟重试一次刷屏（BET_PLAY.md §6.2）。
+            rr["settled"]["announced"] = True
+            log("[warn] 竞猜开奖消息重发 %d 次都失败，放弃（积分已入账）" % tries)
+        return True
+
+    update_bets(_apply, path)
+
+
+def bet_reconcile(cfg, es, items=None, path=BETS_STATE_FILE):
+    """竞猜对账（**零网络、幂等**，每轮 `--results` 尾部跑）。
+
+    ① 清单里 reported 且有人押过 → 结算 + 尽力发开奖；
+    ② 清单里已没有、rounds 里还挂着的未结算 round → 过期作废（静默）。
+    `abandoned` 的不碰：`backfill_abandoned` 次日可能把它救回 reported，
+    提前作废会被打脸（BET_PLAY.md §6.4 终局 5）。
+
+    ⚠️ 为什么是扫描而不是「判定成功时顺手结算」：后者有崩溃缺口 ——
+    reported 落盘后进程被杀，下一轮直接跳过该场，竞猜永远不结算且无任何报错。
+    扫描天然幂等，崩溃恢复是免费的（§6.1）。
+    """
+    if not es.get("bet_enabled", False):
+        return 0
+    now = datetime.now(CST)
+    if items is None:
+        items = (load_results_pending().get("items") or [])
+    live_keys = {_bet_key(it) for it in items}
+    n = 0
+    for it in items:
+        if (it.get("status") or "").strip() != "reported":
+            continue
+        r, need = _bet_settle_one(cfg, es, it, now, path)
+        if need:
+            n += 1
+            _bet_announce_round(cfg, es, r, path)
+    # ② 过期清扫：判据与 `_prune_pending` 同源（ts 早于 now − results_max_age_hours）
+    try:
+        max_age = max(1, int(es.get("results_max_age_hours") or 36)) * 3600
+    except (TypeError, ValueError):
+        max_age = 36 * 3600
+    cutoff = now.timestamp() - max_age
+
+    def _apply(data):
+        changed = False
+        for key, r in (data.get("rounds") or {}).items():
+            if r.get("settled") or key in live_keys:
+                continue
+            if int(r.get("ts") or 0) >= cutoff:
+                continue          # 条目可能还在清单里 / 还没到寿
+            r["settled"] = {
+                "at": now.strftime("%Y-%m-%d %H:%M:%S"),
+                "winner_team": "", "score": "",
+                "void_reason": "expired",
+                "announced": True,      # 静默作废：不发群消息（终局 3）
+                "announce_tries": 0,
+            }
+            changed = True
+            log("[info] 竞猜作废（条目已过期）：%s" % _bet_pair(r))
+        return data if changed else None
+
+    update_bets(_apply, path)
+    return n
 
 
 # ==========================================================================
