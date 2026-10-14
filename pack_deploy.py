@@ -56,6 +56,10 @@ REQUIRED = [
     # 缺了 render_preview_card_html 会 raise → log 后 return None → 纯文本发送，
     # 功能不炸但大图卡永远出不来，所以必须进 REQUIRED。
     "preview_template.html",
+    # 群内 /bet 查询类回复的卡片模板（--listen 渲染 1920x1080 用）。
+    # 缺了 render_bet_card 会 raise → log 后 return None → /bet 查询退回纯文本，
+    # 功能不炸但卡片永远出不来，所以必须进 REQUIRED。
+    "bet_template.html",
     "fonts/BebasNeue-Regular.ttf",
     "fonts/IBMPlexMono-Regular.ttf",
     "fonts/IBMPlexMono-SemiBold.ttf",
@@ -113,6 +117,7 @@ FINGERPRINT = ["watch.py", "selftest.py", "deploy/watchdog.py", "deploy/esports.
                "deploy/result_template.html", "deploy/daily_template.html",
                "deploy/daily_results_template.html",
                "deploy/preview_template.html",
+               "deploy/bet_template.html",
                "deploy/fonts/BebasNeue-Regular.ttf",
                "deploy/fonts/IBMPlexMono-Regular.ttf",
                "deploy/fonts/IBMPlexMono-SemiBold.ttf"]

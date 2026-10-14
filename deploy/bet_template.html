@@ -1,0 +1,184 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<style>
+@font-face { font-family:"Bebas Neue"; src:url("__FONTDIR__/BebasNeue-Regular.ttf"); }
+@font-face { font-family:"IBM Plex Mono"; src:url("__FONTDIR__/IBMPlexMono-Regular.ttf"); font-weight:400; }
+@font-face { font-family:"IBM Plex Mono"; src:url("__FONTDIR__/IBMPlexMono-SemiBold.ttf"); font-weight:600; }
+* { margin:0; padding:0; box-sizing:border-box; }
+html,body { width:1920px; height:1080px; overflow:hidden; }
+body { background:#08090C; color:#F1F3F5;
+  font-family:"IBM Plex Mono","Microsoft YaHei","Noto Sans CJK SC",sans-serif;
+  -webkit-font-smoothing:antialiased; font-variant-numeric:tabular-nums; }
+#app { width:100%; height:100%; display:flex; flex-direction:column; position:relative;
+  background-image:
+    radial-gradient(1000px 760px at 16% 44%, rgba(0,214,107,.05), transparent 66%),
+    radial-gradient(1000px 760px at 84% 44%, rgba(0,214,107,.05), transparent 66%),
+    linear-gradient(rgba(255,255,255,.016) 1px,transparent 1px),
+    linear-gradient(90deg,rgba(255,255,255,.016) 1px,transparent 1px);
+  background-size:auto,auto,48px 48px,48px 48px; }
+.bgvs { position:absolute; left:50%; top:50%; transform:translate(-50%,-54%);
+  font-family:"Bebas Neue"; font-size:820px; line-height:.8; color:rgba(241,243,245,.024);
+  letter-spacing:36px; pointer-events:none; }
+
+/* ---- 顶部：标题 + 日期/规则签 ---- */
+.hd { flex:none; height:96px; display:flex; align-items:center;
+  justify-content:space-between; padding:0 64px; border-bottom:1px solid #272D36;
+  position:relative; }
+.hd .l { display:flex; flex-direction:column; gap:6px; }
+.hd .t1 { font-family:"Bebas Neue"; font-size:46px; line-height:1; letter-spacing:3px; }
+.hd .t1 .g { color:#00D66B; }
+.hd .t2 { font-size:14px; letter-spacing:4px; color:#7D8796; }
+.hd .r { display:flex; flex-direction:column; align-items:flex-end; gap:8px; }
+.hd .d1 { font-family:"Bebas Neue"; font-size:30px; line-height:1; letter-spacing:2px; }
+.hd .d2 { font-size:13px; letter-spacing:2px; color:#7D8796; }
+.hd .d2 b { color:#00D66B; font-weight:600; }
+
+/* ---- v2 规则横幅 ---- */
+.bn { flex:none; height:58px; display:flex; align-items:center; gap:18px;
+  padding:0 64px; border-bottom:1px solid #272D36; background:rgba(21,26,34,.45); }
+.bn .bar { width:4px; height:26px; background:#00D66B; border-radius:2px; }
+.bn .tx { font-size:17px; letter-spacing:1px; }
+.bn .tx b { color:#00D66B; font-weight:600; }
+
+.bd { flex:1; min-height:0; display:flex; gap:48px; padding:26px 64px 18px; }
+/* ---- 左：命令气泡 + 回复气泡（与群里逐字一致的内容）---- */
+.chat { flex:1.35; min-width:0; display:flex; flex-direction:column; }
+.chat .cap { font-size:13px; letter-spacing:3px; color:#7D8796; margin-bottom:12px; }
+.ubub { align-self:flex-end; max-width:70%; background:#00D66B; color:#06281A;
+  border-radius:14px 14px 4px 14px; padding:10px 18px; font-size:15px;
+  font-weight:600; letter-spacing:1px; margin-bottom:14px; }
+.bbub { align-self:flex-start; max-width:100%; background:#11151C;
+  border:1px solid #272D36; border-radius:4px 14px 14px 14px;
+  padding:18px 24px 16px; }
+.bhd { font-size:19px; font-weight:600; letter-spacing:1px; margin-bottom:12px; }
+.rw { display:flex; align-items:baseline; gap:12px; padding:7px 0;
+  border-bottom:1px dashed #1C222B; font-size:16px; letter-spacing:.5px; }
+.rw:last-of-type { border-bottom:none; }
+.rw .ix { flex:none; width:22px; color:#5C6570; font-size:18px; }
+.rw .tx { color:#9AA4B0; min-width:0; }
+.rw.hot .ix { color:#00D66B; }
+.rw.hot .tx { color:#F1F3F5; }
+.note { margin-top:10px; font-size:14px; color:#7D8796; letter-spacing:1px; }
+.cmd { margin-top:12px; font-size:14px; color:#00D66B; letter-spacing:1px; }
+/* ---- 右：v2 时间逻辑 ---- */
+.tl { flex:1; min-width:0; display:flex; flex-direction:column; }
+.tl .cap { font-size:13px; letter-spacing:3px; color:#7D8796; margin-bottom:12px; }
+.exti { font-size:15px; color:#C9D1D9; letter-spacing:1px; margin-bottom:20px; }
+.exti b { color:#F1F3F5; }
+.stages { display:flex; flex-direction:column; }
+.st { display:flex; align-items:flex-start; gap:18px; position:relative; padding-bottom:26px; }
+.st:last-child { padding-bottom:0; }
+.st .dot { flex:none; width:14px; height:14px; border-radius:50%; margin-top:5px;
+  background:#272D36; border:2px solid #3A4250; }
+.st.done .dot { background:#00D66B; border-color:#00D66B;
+  box-shadow:0 0 14px rgba(0,214,107,.55); }
+.st.next .dot { background:#FFB020; border-color:#FFB020;
+  box-shadow:0 0 14px rgba(255,176,32,.5); }
+.st:not(:last-child)::before { content:""; position:absolute; left:6px; top:19px;
+  bottom:0; width:2px; background:#272D36; }
+.st.done:not(:last-child)::before { background:rgba(0,214,107,.45); }
+.st .tm { flex:none; min-width:76px; font-family:"Bebas Neue"; font-size:26px;
+  letter-spacing:1px; line-height:1.1; color:#7D8796; white-space:nowrap; }
+.st.done .tm { color:#00D66B; }
+.st.next .tm { color:#FFB020; }
+.st .t1 { font-size:17px; font-weight:600; letter-spacing:1px; }
+.st .t2 { font-size:14px; color:#7D8796; letter-spacing:1px; margin-top:4px; }
+.nofocus { font-size:15px; color:#7D8796; letter-spacing:1px; margin-bottom:20px; }
+.win { margin-top:22px; border:1px solid rgba(0,214,107,.35); border-radius:12px;
+  background:rgba(0,214,107,.07); padding:16px 22px; }
+.win .w1 { font-size:16px; font-weight:600; color:#00D66B; letter-spacing:2px; }
+.win .w2 { font-size:14px; color:#9AA4B0; letter-spacing:1px; margin-top:6px; }
+
+/* ---- 页脚 ---- */
+.ftr { flex:none; height:46px; display:flex; align-items:center;
+  justify-content:space-between; padding:0 64px; border-top:1px solid #272D36;
+  font-size:13px; letter-spacing:1.5px; color:#5C6570; }
+.ftr b { color:#7D8796; font-weight:600; }
+</style>
+</head>
+<body>
+<div id="app">
+  <div class="bgvs">VS</div>
+  <div class="hd">
+    <div class="l">
+      <div class="t1">CS2 <span class="g">/BET</span> 竞猜</div>
+      <div class="t2" id="hdsub"></div>
+    </div>
+    <div class="r">
+      <div class="d1" id="date"></div>
+      <div class="d2" id="ruletag"></div>
+    </div>
+  </div>
+  <div class="bn"><div class="bar"></div><div class="tx" id="banner"></div></div>
+  <div class="bd">
+    <div class="chat">
+      <div class="cap">群里发送 @机器人 /bet → 机器人回复（内容与纯文本回复逐字一致）</div>
+      <div class="ubub" id="cmd"></div>
+      <div class="bbub">
+        <div class="bhd" id="head"></div>
+        <div id="rows"></div>
+        <div class="note" id="note" style="display:none"></div>
+        <div class="cmd" id="cmdline" style="display:none"></div>
+      </div>
+    </div>
+    <div class="tl">
+      <div class="cap">时间逻辑：总预告发布 → 开放 → 封盘 → 开赛 → 结算</div>
+      <div class="exti" id="example" style="display:none"></div>
+      <div class="nofocus" id="nofocus" style="display:none"></div>
+      <div class="stages" id="stages"></div>
+      <div class="win" id="win" style="display:none">
+        <div class="w1" id="w1"></div>
+        <div class="w2" id="w2"></div>
+      </div>
+    </div>
+  </div>
+  <div class="ftr"><span id="src"></span><span id="gen"></span></div>
+</div>
+<script>
+const b = __BET__;
+function esc(s){ return String(s??"").replace(/&/g,"&amp;").replace(/</g,"&lt;"); }
+const $ = id => document.getElementById(id);
+
+/* 顶部 */
+$("hdsub").textContent = esc(b.headSub || "");
+$("date").textContent = esc(b.date || "");
+$("ruletag").innerHTML = esc(b.ruleTag || "").replace("V2", "<b>V2</b>");
+$("banner").innerHTML = esc(b.banner || "").replace(/（([^）]*)）/g, "（<b>$1</b>");
+
+/* 左：命令气泡 + 回复气泡 */
+$("cmd").textContent = esc(b.cmd || "");
+$("head").textContent = esc(b.head || "");
+$("rows").innerHTML = (b.rows || []).map(r =>
+  `<div class="rw${r.hot ? " hot" : ""}"><span class="ix">${esc(r.ix)}</span>` +
+  `<span class="tx">${esc(r.text)}</span></div>`).join("");
+if (b.note){ $("note").style.display = ""; $("note").textContent = esc(b.note); }
+if (b.cmdline){ $("cmdline").style.display = ""; $("cmdline").textContent = esc(b.cmdline); }
+
+/* 右：时间逻辑（focus 为空时只说明「当前没有开放中的比赛」）*/
+const f = b.focus;
+if (f && f.stages && f.stages.length){
+  if (f.example){ $("example").style.display = ""; $("example").innerHTML = esc(f.example); }
+  $("stages").innerHTML = f.stages.map(s =>
+    `<div class="st ${esc(s.state || "todo")}"><div class="dot"></div>` +
+    `<div class="tm">${esc(s.time || "")}</div>` +
+    `<div><div class="t1">${esc(s.title || "")}</div>` +
+    `<div class="t2">${esc(s.sub || "")}</div></div></div>`).join("");
+} else {
+  $("nofocus").style.display = "";
+  $("nofocus").textContent = esc((f && f.example) ||
+    "当前没有开放中的比赛 —— 下一场总预告发布后即可下注");
+}
+if (b.win){
+  $("win").style.display = "";
+  $("w1").textContent = esc(b.win.w1 || "");
+  $("w2").textContent = esc(b.win.w2 || "");
+}
+
+/* 页脚 */
+$("src").innerHTML = esc(b.footerL || "");
+$("gen").textContent = esc(b.footerR || "");
+</script>
+</body>
+</html>

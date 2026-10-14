@@ -52,6 +52,8 @@
 
 | **（本次）** | **战报卡 RTG 列改成三档配色**（>1.00 绿 / <1.00 红 / ==1.00 白） | 战报卡最下面那张 5v5 明细表的 **RTG 列**，不再只把「本队最高分」染绿，改成按 **1.00** 分三档：**高于 1.00 绿、低于 1.00 红、正好 1.00 白**。判据**先四舍五入到两位**再比 —— `1.004` 显示成 `"1.00"`，就按**白**处理（显示的什么数，就用什么数配色）。MVP 区块那个大号 **RATING** 数字走**同一判据**（此前写死绿色）。**只动 `result_template.html`**（另在 `esports.py` 加了 5 条自检把这条规则钉住），其余模板 / 字体 / `watch.py` / `selftest.py` / `watchdog.py` 一字未动。⚠️ **`result_template.html` 必须一起更新**，只换脚本的话群里还是旧配色 —— `install-watch.sh` 会连模板一起装。同时 `CITO_TEAM_ALIASES` 补了一条 `1w Team → 1win`（Liquipedia 写 `1w Team`、Cito 写 `1win`，变体集合求交失败会导致**整场拿不到选段**） |
 
+| **（本次）** | **`/bet` 查询类回复升级为 1920×1080 卡片大图** | 群内 `/bet 看列表 / 我的 / 排行 / 规则` 四条**查询**命令的回复，从纯文本升级成和赛程同款的深色大图（左边是命令气泡 + 机器人回复，右边是这场比赛的**四阶段时间线**）。**只动查询** —— 下注 / 改单的**动作回执**、以及**开奖消息**仍然是纯文本，一个字没变。**新增 1 个文件 `bet_template.html`**；出图失败自动退回原来那段纯文本（消息永远照发），并有开关 `esports.bet_card_enabled`（默认 `true`，改 `false` 即整体回滚成纯文本）。⚠️ **`bet_template.html` 必须随包一起装** —— 只换脚本不装模板，四条查询会安静退回纯文本。卡片文案与纯文本**逐字同源**（同一批行数据渲染），不会出现「图里说还能押、文本说已封盘」。**`watch.py` / `selftest.py` / `watchdog.py` / 其余四个模板与字体一字未动** |
+
 下面那张表是「装下播提醒」那一版的记录，**留作历史说明**，实际以第 0 步的指纹表为准。
 
 ---
@@ -86,10 +88,10 @@
 cd <你放 deploy.zip 的目录>
 unzip -o deploy.zip && cd deploy
 sha256sum watch.py selftest.py watchdog.py esports.py result_template.html daily_template.html \
-  daily_results_template.html preview_template.html config.example.json \
+  daily_results_template.html preview_template.html bet_template.html config.example.json \
   card_font.otf make_card_font.py fonts/*.ttf | cut -c1-16
 wc -c watch.py selftest.py watchdog.py esports.py result_template.html daily_template.html \
-  daily_results_template.html preview_template.html config.example.json \
+  daily_results_template.html preview_template.html bet_template.html config.example.json \
   card_font.otf make_card_font.py fonts/*.ttf
 sha256sum ../deploy.zip | cut -c1-16
 ```
@@ -101,12 +103,13 @@ sha256sum ../deploy.zip | cut -c1-16
 | `watch.py` | `13243138d39468a9` | 54493 |
 | `selftest.py` | `8f053b5f4404ceea` | 34274 |
 | `watchdog.py` | `0b66acce3c3d7571` | 85650 |
-| `esports.py` | `114684ab1d6eb990` | 417897 |
+| `esports.py` | `31f0a54a25ae0782` | 505392 |
 | `result_template.html`（V2 单场战报模板，**RTG 三档配色**） | `8da45799d1fc5b78` | 11120 |
 | `daily_template.html`（V2 总预告模板） | `0653140883abc5d3` | 8784 |
 | `daily_results_template.html`（**V2 全天整合版模板**） | `5218bee78c886056` | 10271 |
 | `preview_template.html`（开赛提醒模板） | `5b20c5c517966626` | 8366 |
-| `config.example.json`（配置样板，含 Cito 开关与结算超时默认值） | `179328b8a8dffe81` | 16535 |
+| `bet_template.html`（**/bet 查询卡片模板**） | `f1dfea2b7b3d9257` | 9091 |
+| `config.example.json`（配置样板，含 Cito 开关与结算超时默认值） | `80be1bc414f69f3c` | 18876 |
 | `fonts/BebasNeue-Regular.ttf` | `08e4623805102d81` | 61400 |
 | `fonts/IBMPlexMono-Regular.ttf` | `6a3412f058c7d8df` | 135580 |
 | `fonts/IBMPlexMono-SemiBold.ttf` | `d3c38e55c78f5b0f` | 140216 |
@@ -324,11 +327,11 @@ python3 esports.py --selftest; echo "退出码=$?"
 
   | 条件 | 项数 |
   |---|---|
-  | 满配（Pillow + `make_card_font.py` + 无头浏览器，正常情况） | **483** |
-  | 少了 `make_card_font.py` | 481（少 2 条「两张字符表是否一致」的断言） |
+  | 满配（Pillow + `make_card_font.py` + 无头浏览器，正常情况） | **547** |
+  | 少了 `make_card_font.py` | 545（少 2 条「两张字符表是否一致」的断言） |
   | 没装无头浏览器 | 少 5 条（HTML 真渲染断言换成「没浏览器返回 None」的降级断言） |
   | 没装 Pillow | 四张 880px 卡片的渲染断言换成降级断言 |
-  | **装好的机器上**（没有 `config.example.json` / `*.service`） | **478**（少 5 条，打 `[skip]`） |
+  | **装好的机器上**（没有 `config.example.json` / `*.service`） | **542**（少 5 条，打 `[skip]`） |
 
   ⚠️ 最后那一行：`config.example.json` / `douyu-esports-daily.service` / `douyu-cmd.service`
   只在仓库和部署包里，`install-watch.sh` 不把它们装到 `/opt/douyu-live-notify`。
