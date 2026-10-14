@@ -2031,6 +2031,28 @@ def _html_logo(url, es, budget):
     return _file_uri(p) if p else ""
 
 
+def _html_logo_cached(url):
+    """队标 URL → 本地缓存的 file:// URI；**只看缓存，绝不联网**。
+
+    与 `_html_logo` 的区别：`_html_logo` 缺了就下（09:30 总预告那条线上用，
+    一轮有 `logo_max_new_per_run` 预算兜着）；`/bet` 是群里**随时**的问答，
+    有人问一句不能就去抓十几张图 —— 缓存里没有就返回空串，模板画占位块。
+    缓存通常已被当天 09:30 的总预告预热过（同一批比赛、同一批 URL）。
+
+    ⚠️ 自检有 AST 断言钉住这里**不许**出现 `ensure_logo`/`fetch_logo_bytes`
+       （`/bet` 的零网络纪律，BET_PLAY.md §14.1）。
+    """
+    if not url:
+        return ""
+    try:
+        p = _logo_cache_path(url)
+        if os.path.isfile(p) and os.path.getsize(p) > 0:
+            return _file_uri(p)
+    except OSError:
+        pass
+    return ""
+
+
 def _aggregate_players(row):
     """把「逐图选手原始结构」聚成整场：K/D 累加，ADR/KAST/Rating 取平均。
 
@@ -7712,7 +7734,8 @@ def selftest():
                 "_bet_mine_body", "_bet_rank_body", "bet_reconcile",
                 "_bet_settle_one", "_bet_announce_round", "update_bets",
                 "_bet_query_reply", "bet_query_card", "render_bet_card",
-                "build_bet_card_data")
+                "build_bet_card_data", "_bet_match_row", "_bet_mine_rows",
+                "_bet_rank_rows", "_bet_row_status", "_html_logo_cached")
     _net_syms = ("http_request", "fetch_matches", "cito_get", "onebot_api",
                  "parse_gate", "get_rank", "extract_html", "parse_matches",
                  "attach_maps", "attach_cito_players")
@@ -7864,29 +7887,46 @@ def selftest():
     t.check("卡片(list)：note/cmdline 与纯文本的尾部说明同源",
             _cdl["note"] == "（后附 1 场已封盘/已开奖，仅供对照，不能再押）"
             and _cdl["cmdline"].split("\n")[0] == "下注：/bet 1 A 或 /bet 1 B（A=①主队）")
-    t.check("⚑ 卡片(list)：焦点 = 列表第①行，四阶段与封盘线/起抓结果对齐",
-            _cdl["focus"]["example"].startswith("以列表第①行为例")
-            and [s["title"] for s in _cdl["focus"]["stages"]]
-            == ["总预告发布", "封盘（开赛前 10 分钟）", "开赛", "起抓结果"]
-            and [s["state"] for s in _cdl["focus"]["stages"]]
-            == ["done", "next", "todo", "todo"],
-            _cdl["focus"])
-    t.check("卡片(list)：阶段时间按渲染时刻现算（登记已过=done，封盘未到=next）",
-            _cdl["focus"]["stages"][0]["time"] == _bet_hm(_t_now - 3600, _cd_now)
-            and _cdl["focus"]["stages"][1]["time"]
-            == _bet_hm(_t_now + 7200 - 600, _cd_now))
+    # 2026-10-14 改版：单栏铺满 + 列表行画队标（用户要求「展示队标、队名、封盘时间」）
+    _r0 = _cdl["rows"][0]
+    t.check("⚑ 卡片(list)：富行字段齐全（队标/队名/开赛时间/状态/状态胶囊）",
+            all(k in _r0 for k in ("a", "b", "la", "lb", "tm", "r1", "r2",
+                                   "chip", "ck", "hot", "ix"))
+            and _r0["a"] == "Team Vitality" and _r0["b"] == "NAVI"
+            and _r0["chip"] == "可下注" and _r0["ck"] == ""
+            and _cdl["rows"][1]["ck"] == "off")
+    t.check("⚑ 卡片行：队名/状态栏与纯文本行取数同源"
+            "（r1 就是 _bet_row_status，不另算一套）",
+            _r0["r1"] == _bet_row_status("open", _items_lst[0], _esb_on, _cd_now)
+            and _r0["r1"] in _r0["text"] and _r0["a"] in _r0["text"]
+            and _r0["tm"] == _bet_hm(_items_lst[0]["ts"], _cd_now))
+    t.check("卡片行：队标只认本地缓存（没有 logos 字段时给空串，模板画占位块）",
+            _r0["la"] == "" and _r0["lb"] == ""
+            and build_bet_card_data(
+                "list",
+                [{"teams": ["A", "B"], "ts": _t_now + 7200, "bo": "Bo3",
+                  "reg_ts": _t_now - 3600, "status": "pending",
+                  "logos": ["", "https://example.invalid/x.png"]}],
+                _empty_bets, "777", _cd_now, _esb_on)["rows"][0]["lb"] == "")
+    t.check("⚑ 结构：队标走 _html_logo_cached（只看缓存），不许出现 ensure_logo"
+            "（/bet 零网络纪律 —— 有人问一句不能就去抓十几张图）",
+            "_html_logo_cached" in _call_names(_fn_def("_bet_match_row"))
+            and "_html_logo" not in _call_names(_fn_def("_bet_match_row"))
+            and not ({"ensure_logo", "fetch_logo_bytes", "http_request",
+                      "urlopen"} & set(_call_names(_fn_def("_html_logo_cached"))))) 
     _cde = build_bet_card_data("list", [], _empty_bets, "777", _cd_now, _esb_on)
-    t.check("卡片(list)：没有已预告的比赛 → 头行明说、不画焦点时间线",
+    t.check("卡片(list)：没有已预告的比赛 → 头行明说 + 大字空态撑满版面",
             _cde["head"] == "【CS2 竞猜】接下来没有已预告的比赛"
-            and _cde["rows"] == [] and _cde["focus"] is None)
+            and _cde["rows"] == [] and _cde["empty"]
+            and "没有已预告的比赛" in _cde["empty"])
     _cdx = build_bet_card_data(
         "list", [{"teams": ["Alpha", "Beta"], "ts": _t_now + 300, "bo": "Bo3",
                   "reg_ts": _t_now - 3600, "status": "pending"}],
         _empty_bets, "777", _cd_now, _esb_on)
-    t.check("卡片(list)：都过了封盘线 → note 说出下一场，焦点仍是下一场",
+    t.check("卡片(list)：都过了封盘线 → note 说出下一场 + 空态也写明下一场",
             "下一场：Alpha vs Beta" in _cdx["note"] and _cdx["rows"] == []
-            and _cdx["focus"] is not None
-            and _cdx["focus"]["example"].startswith("以下一场为例"))
+            and "当前没有开放下注的比赛" in _cdx["empty"]
+            and "已封盘" in _cdx["empty"])
     _bets_mine = {"rounds": {_SEED_KEY: dict(
                       _seed_rounds[_SEED_KEY],
                       bets=[{"uid": "777", "nick": "群友A", "pick": "A",
@@ -7899,12 +7939,21 @@ def selftest():
     t.check("卡片(mine)：头行/行文案与纯文本同源；未结算的注高亮",
             _cdm["head"] == _bm.split("\n")[0]
             and [r["text"] for r in _cdm["rows"]] == _bm.split("\n")[1:]
-            and all(r["hot"] for r in _cdm["rows"])
-            and _cdm["focus"]["example"].startswith("以你押的这场为例"))
-    t.check("卡片(mine)：没押过注 → note 说明、不崩",
+            and all(r["hot"] for r in _cdm["rows"]))
+    t.check("卡片(mine)：富行带队名/队标/我的选择/结果，且与 text 同源",
+            _cdm["rows"][0]["a"] == "Vitality" and _cdm["rows"][0]["b"] == "NAVI"
+            and _cdm["rows"][0]["la"] == "" and _cdm["rows"][0]["tm"]
+            and _cdm["rows"][0]["r1"] in _cdm["rows"][0]["text"])
+    t.check("⚑ 卡片(mine)：结果胶囊必须是短标签（整句塞胶囊会撑破右侧栏）",
+            all(len(_q["chip"]) <= 4 for _q in _cdm["rows"])
+            and _cdm["rows"][0]["ck"] in _BET_MINE_CHIP
+            and _cdm["rows"][0]["r2"] == "你猜了 A")
+    t.check("卡片(mine)：没押过注 → note + 大字空态",
             build_bet_card_data("mine", _items_lst, _empty_bets, "777",
                                 _cd_now, _esb_on)["note"]
-            == "还没有押过注 —— /bet 看当前可下注的比赛")
+            == "还没有押过注 —— /bet 看当前可下注的比赛"
+            and build_bet_card_data("mine", _items_lst, _empty_bets, "777",
+                                    _cd_now, _esb_on)["empty"])
     t.check("🔴 坑 9：round 配不上清单条目（掉窗口/队名被改写）→ 答「待开奖」不崩",
             # _bets_mine 那一轮的 ts=1000 与 _items_lst 里任何一条都配不上，
             # 正是这个场景；以前 bet_close_ts(None) 会直接把自检/命令打炸。
@@ -7926,6 +7975,22 @@ def selftest():
             and _cdr["head"] == _br.split("\n")[0]
             and ["%d. %s" % (i, r["text"])
                  for i, r in enumerate(_cdr["rows"], 1)] == _br.split("\n")[1:])
+    t.check("卡片(rank)：大字版式的名次/昵称/分数拆字段，且与 text 同一批数字",
+            [_q["rk"] for _q in _cdr["rows"]] == ["1", "2", "3"]
+            and [_q["nick"] for _q in _cdr["rows"]]
+            == [x["nick"] for x in _bet_rank_rows(_bets_rank)]
+            and _cdr["rows"][0]["pt"]
+            == "%d 分" % _bet_rank_rows(_bets_rank)[0]["pts"]
+            and _cdr["rows"][0]["sub"]
+            == "中 %d/%d" % (_bet_rank_rows(_bets_rank)[0]["hits"],
+                             _bet_rank_rows(_bets_rank)[0]["total"])
+            and "%s %s（%s）" % (_cdr["rows"][0]["nick"], _cdr["rows"][0]["pt"],
+                                 _cdr["rows"][0]["sub"]) == _cdr["rows"][0]["text"])
+    t.check("卡片(rank)：没人上榜 → 大字空态",
+            build_bet_card_data("rank", _items_lst, _empty_bets, "777",
+                                _cd_now, _esb_on)["empty"]
+            and build_bet_card_data("rank", _items_lst, _empty_bets, "777",
+                                    _cd_now, _esb_on)["rows"] == [])
     _cdru = build_bet_card_data("rules", _items_lst, _empty_bets, "777",
                                 _cd_now, _esb_on)
     _bru = bet_rules_text(_esb_on)
@@ -7933,6 +7998,16 @@ def selftest():
             _cdru["head"] == _bru.split("\n")[0]
             and [r["text"] for r in _cdru["rows"]]
             == [ln[2:] for ln in _bru.split("\n")[1:]])
+    t.check("卡片(rules/rank)：无行号时 rk 给空串（模板画绿点，不显示 undefined）",
+            all(r["rk"] == "" for r in _cdru["rows"]))
+    # ---- 2026-10-14 改版：删掉右栏四阶段时间线，改单栏铺满 ----
+    t.check("⚑ 卡片：去掉右栏时间线（数据里没有 focus/win，避免死字段）",
+            "focus" not in _cdl and "win" not in _cdl
+            and "focus" not in _cdru and "win" not in _cdru
+            and "_bet_focus" not in globals() and "BET_CARD_WIN_W2" not in globals())
+    t.check("卡片：layout 两模式（列表/我的=rows 富行；规则/排行=fill 大字）",
+            _cdl["layout"] == "rows" and _cdm["layout"] == "rows"
+            and _cdru["layout"] == "fill" and _cdr["layout"] == "fill")
     t.check("⚑ 结构：查询类走卡片渲染链"
             "（_bet_query_reply → bet_query_card → render_bet_card）",
             "bet_query_card" in _call_names(_fn_def("_bet_query_reply"))
@@ -7977,6 +8052,21 @@ def selftest():
         _miss_keys = [k for k in _cdl if k not in _bt_txt]
         t.check("⚑ 契约：卡片数据对象的每个键都在模板里被消费（加了不画 = 死字段）",
                 not _miss_keys, _miss_keys)
+        # 行内字段同理：rows 的每个键模板都要用到，否则是加了没画
+        _row_keys = set()
+        for _d in (_cdl, _cdm, _cdr, _cdru):
+            for _q in _d["rows"]:
+                _row_keys |= set(_q)
+        _miss_rk = sorted(k for k in _row_keys if k not in _bt_txt)
+        t.check("契约：卡片行字段全部被模板消费（队标/队名/状态栏都不许是死字段）",
+                not _miss_rk, _miss_rk)
+        # 2026-10-14 改版：右栏四阶段时间线必须真的从模板里删干净（只删数据不算数）
+        t.check("⚑ 契约：模板里已无右栏时间线残留（stages/nofocus/tl）",
+                "stages" not in _bt_txt and "nofocus" not in _bt_txt
+                and 'class="tl"' not in _bt_txt)
+        t.check("契约：模板两模式齐备（rows 富行 + fill 大字 + 空态）",
+                "mrw" in _bt_txt and "frw" in _bt_txt and "empty" in _bt_txt
+                and 'b.layout === "fill"' in _bt_txt)
     else:
         print("    [skip] 缺 bet_template.html（契约断言跳过，卡片会降级）")
     if find_chrome(es):
@@ -8864,6 +8954,27 @@ def _bet_my_pick(bets, item, uid):
     return None
 
 
+def _bet_row_status(st, it, es, now):
+    """一行的**状态短语**（纯文本那一行的中段：封盘 / 开放 / 已封盘 / 已开奖 / 取消）。
+
+    `_bet_row_text`（文本）与卡片右侧状态栏**共用它** —— 一个来源两处渲染，
+    才不会出现「图上写 16:20 封盘、文本写已封盘」这种自相矛盾。
+    """
+    if st == "open":
+        return "%s 封盘" % _bet_hm(bet_close_ts(it, es), now)
+    if st == "upcoming":
+        # v2：开放锚点是登记时刻（总预告发布），不是开赛时刻
+        return "%s 开放" % _bet_hm(int(it.get("reg_ts") or 0), now)
+    if st == "closed":
+        return "已封盘"
+    if st == "settled":
+        sc = (it.get("score") or "").strip()
+        return "已开奖%s" % ((" %s" % sc) if sc else "")
+    if st == "cancelled":
+        return "赛事取消"
+    return ""
+
+
 def _bet_row_text(st, it, es, now, my_pick):
     """列表一行的**文案**（不含编号）。卡片与纯文本共用它 —— 两边必须逐字一致，
     否则「图里说还能押、文本说已封盘」比没有图更糟（自检断言钉住）。"""
@@ -8871,18 +8982,9 @@ def _bet_row_text(st, it, es, now, my_pick):
     bo = (it.get("bo") or "").strip()
     if bo:
         bits.append(bo)
-    if st == "open":
-        bits.append("%s 封盘" % _bet_hm(bet_close_ts(it, es), now))
-    elif st == "upcoming":
-        # v2：开放锚点是登记时刻（总预告发布），不是开赛时刻
-        bits.append("%s 开放" % _bet_hm(int(it.get("reg_ts") or 0), now))
-    elif st == "closed":
-        bits.append("已封盘")
-    elif st == "settled":
-        sc = (it.get("score") or "").strip()
-        bits.append("已开奖%s" % ((" %s" % sc) if sc else ""))
-    elif st == "cancelled":
-        bits.append("赛事取消")
+    stt = _bet_row_status(st, it, es, now)
+    if stt:
+        bits.append(stt)
     if my_pick:
         bits.append("你猜了 %s" % my_pick)
     return " · ".join(bits)
@@ -8945,8 +9047,9 @@ def _bet_list_body(items, bets, uid, now, es):
 
 
 def _bet_mine_rows(items, bets, uid, now, es):
-    """「我的」各行数据（卡片用）：[{text, hot}]，hot = 这注还没结算（进行中）。
-    没有押过注返回空列表。文案与 `_bet_mine_body` 逐行同源。"""
+    """「我的」各行数据（卡片用）：[{text, hot, ...}]，hot = 这注还没结算（进行中）。
+    没有押过注返回空列表。`text` 与 `_bet_mine_body` 逐行同源；其余字段（队标/队名/
+    时间/我的选择/结果）只给卡片排版用，取数口径与 `text` 完全一致。"""
     idx = {_bet_key(it): it for it in items or []}
     mine = [r for r in (bets.get("rounds") or {}).values()
             if any(str(b.get("uid")) == uid for b in (r.get("bets") or []))]
@@ -8956,18 +9059,27 @@ def _bet_mine_rows(items, bets, uid, now, es):
     for r in mine[:12]:
         b = next(x for x in (r.get("bets") or []) if str(x.get("uid")) == uid)
         when = _bet_hm(r.get("ts"), now)
-        pair = " vs ".join(_clip(t) for t in list(r.get("teams") or [])[:2]) or "?"
+        _tn = [_clip(t) for t in list(r.get("teams") or [])[:2]]
+        pair = " vs ".join(_tn) or "?"          # 与旧文案逐字一致（不要改成 "? vs ?"）
+        teams = _tn + ["?"] * (2 - len(_tn))
+        logos = list(r.get("logos") or [])[:2]
+        while len(logos) < 2:
+            logos.append("")
         s = r.get("settled")
         if s:
             vr = s.get("void_reason")
             if vr == "undecidable":
                 st = "作废（胜者名称对不上）"
+                kind = "void"
             elif vr == "expired":
                 st = "已过期，未开奖"
+                kind = "void"
             elif _bet_pick_hits(b, s.get("winner_team"), r.get("teams")):
                 st = "猜中 +%d" % per_hit
+                kind = "hit"
             else:
                 st = "猜错"
+                kind = "miss"
         else:
             it = idx.get(_bet_key(r))
             if it is None:
@@ -8984,8 +9096,14 @@ def _bet_mine_rows(items, bets, uid, now, es):
                       "upcoming": "%s 开放" % _bet_hm(int(it.get("reg_ts") or 0), now),
                       "closed": "已封盘，待开奖"}.get(
                     bet_round_state(it, now, es), "待开奖")
+            kind = "live"
         rows.append({"text": "%s %s · 猜 %s · %s" % (when, pair, b.get("pick"), st),
-                     "hot": not s})
+                     "hot": not s,
+                     "a": teams[0], "b": teams[1],
+                     "la": _html_logo_cached(logos[0]),
+                     "lb": _html_logo_cached(logos[1]),
+                     "tm": when, "pick": str(b.get("pick") or ""),
+                     "res": st, "kind": kind})
     return rows
 
 
@@ -9004,19 +9122,25 @@ def _bet_mine_body(items, bets, uid, now, es):
 
 
 def _bet_rank_rows(bets):
-    """排行榜行数据（卡片用）：[{text, hot}]，前三名高亮。没人猜中过返回空列表。
-    text **不含名次**（名次由调用方按行号出，卡片与文本才不至于重复编号）。"""
+    """排行榜行数据（卡片用）：[{text, hot, ...}]，前三名高亮。没人猜中过返回空列表。
+    text **不含名次**（名次由调用方按行号出，卡片与文本才不至于重复编号）；
+    nick/pts/hits/total 是给卡片大字版式用的同一批数字。"""
     users = [u for u in (bets.get("users") or {}).values()
              if int(u.get("pts") or 0) > 0]
     # 同分：最近一次得分时间降序（活跃者靠前），再按昵称兜底（稳定输出）。
     users.sort(key=lambda u: (-int(u.get("pts") or 0),
                               -float(u.get("last_pts_at") or 0),
                               _safe_nick(u.get("nick"))))
-    return [{"text": "%s %d 分（中 %d/%d）"
-             % (_safe_nick(u.get("nick")), int(u.get("pts") or 0),
-                int(u.get("hits") or 0), int(u.get("total") or 0)),
-             "hot": i <= 3}
-            for i, u in enumerate(users[:10], 1)]
+    rows = []
+    for i, u in enumerate(users[:10], 1):
+        nick = _safe_nick(u.get("nick"))
+        pts = int(u.get("pts") or 0)
+        hits = int(u.get("hits") or 0)
+        total = int(u.get("total") or 0)
+        rows.append({"text": "%s %d 分（中 %d/%d）" % (nick, pts, hits, total),
+                     "hot": i <= 3,
+                     "nick": nick, "pts": pts, "hits": hits, "total": total})
+    return rows
 
 
 def _bet_rank_body(bets):
@@ -9032,46 +9156,47 @@ def _bet_rank_body(bets):
 # 2026-10-12 用户确认接入：查询类（列表/我的/排行/规则）回复升级成与 /赛事 同款
 # 视觉的卡片大图。**只升查询** —— 下注/改单回执与开奖消息保持纯文本（动作要快，
 # 且回执里没有值得画成图的信息）。降级哲学与开赛提醒一致：图出不了 → 原纯文本。
-BET_CARD_WIN_W2 = ("群里随时 /bet 下注，封盘前可随时改单；"
-                   "开赛后不再收注（信息对称，不看着比分下注）")
+# 2026-10-14 用户看预览后要求改版：**去掉右栏「四阶段时间线」示例**（占掉近一半
+# 版面、信息量却接近于零），改**单栏铺满**，并且列表行要画**队标**：
+#   · layout="rows"（列表/我的）：一场一行 —— 队标 · 队名 · 封盘时间 · 状态，
+#     行高由 flex:1 均分，把整张图填满；
+#   · layout="fill"（规则/排行）：大字号行，字号按行数自适应，尽量填满版面。
+# 队标走 `_html_logo_cached`（**只看缓存、绝不联网**），缓存里没有就画占位块。
+_BET_CHIP = {"open": "可下注", "upcoming": "待开放", "closed": "已封盘",
+             "settled": "已开奖", "cancelled": "已取消"}
+# 「我的」一行的结果胶囊 —— 必须是**短标签**：右栏只有 156px，把「作废（胜者名称
+# 对不上）」这种整句塞进胶囊会撑破版面（2026-10-14 预览里实测到）。整句仍在
+# 右侧状态栏（r1）里完整显示，胶囊只是颜色标记。
+_BET_MINE_CHIP = {"hit": "猜中", "miss": "猜错", "void": "作废", "live": "待开奖"}
 
 
-def _bet_focus(item, es, now, label):
-    """右栏四阶段时间线：总预告发布 → 封盘 → 开赛 → 起抓结果。
+def _bet_match_row(ix, st, it, es, now, my_pick):
+    """列表一行的**卡片形态**：`text` 与纯文本逐字同源（`_bet_row_text`），
+    另外拆出「队标 / 队名 / 开赛时间 / 状态」几栏给模板排版。
 
-    `label` 用于 example 行（「列表第①行」/「下一场」/「你押的这场」）。
-    item=None → 返回 None（模板改显「当前没有开放中的比赛」）。
-    阶段状态按**渲染时刻**现算：已过去 = done（绿），下一个未到的 = next（琥珀），
-    其余 = todo（灰）—— 静态图不伪造倒计时。
+    取数口径完全一致 —— 状态栏用的就是 `_bet_row_status`、队名用的就是 `_clip`，
+    不另算一套（「图上一种说法、文本另一种」比没有图更糟）。
     """
-    if not item:
-        return None
-    before = _bet_close_before_s(es) // 60
-    ts = int(item.get("ts") or 0)
-    reg = int(item.get("reg_ts") or 0)
-    bo = (item.get("bo") or "").strip()
-    grace_s, _timeout_s = _settle_seconds(bo, es)
-    teams = " vs ".join(str(t) for t in list(item.get("teams") or [])[:2]) or "?"
-    raw = [
-        (reg, "总预告发布", "登记即开放下注"),
-        (bet_close_ts(item, es), "封盘（开赛前 %d 分钟）" % before, "停止下注 / 改单"),
-        (ts, "开赛", "不再接受下注"),
-        (ts + grace_s, "起抓结果", "判定 → 结算 + 开奖消息"),
-    ]
-    now_ts = now.timestamp()
-    stages, seen_next = [], False
-    for t, title, sub in raw:
-        # t=0 = reg_ts 缺省（旧条目）= 早已登记 → done；不是「未来」
-        if t <= now_ts:
-            state = "done"
-        elif not seen_next:
-            state, seen_next = "next", True
-        else:
-            state = "todo"
-        stages.append({"time": _bet_hm(t, now) if t else "已登记",
-                       "title": title, "sub": sub, "state": state})
-    return {"example": "以%s为例：%s（%s）" % (label, teams, bo or "赛制未定"),
-            "stages": stages}
+    teams = [str(t) for t in list(it.get("teams") or [])[:2]]
+    logos = [str(u or "") for u in list(it.get("logos") or [])[:2]]
+    while len(teams) < 2:
+        teams.append("?")
+    while len(logos) < 2:
+        logos.append("")
+    bo = (it.get("bo") or "").strip()
+    return {
+        "ix": ix,
+        "text": _bet_row_text(st, it, es, now, my_pick),
+        "hot": st == "open",
+        "a": _clip(teams[0]), "b": _clip(teams[1]),
+        "la": _html_logo_cached(logos[0]), "lb": _html_logo_cached(logos[1]),
+        "tm": _bet_hm(it.get("ts"), now),
+        "r1": _bet_row_status(st, it, es, now),
+        "r2": " · ".join([x for x in (bo, ("你猜了 %s" % my_pick) if my_pick else "")
+                          if x]),
+        "chip": _BET_CHIP.get(st, ""),
+        "ck": "" if st == "open" else "off",
+    }
 
 
 def build_bet_card_data(kind, items, bets, uid, now, es):
@@ -9080,6 +9205,12 @@ def build_bet_card_data(kind, items, bets, uid, now, es):
     文案与同名纯文本回复**逐字同源**：列表行共用 `_bet_row_text`，「我的」/排行
     共用 `_bet_mine_rows` / `_bet_rank_rows` —— 卡片是同一回复的图形化，
     不是另一套口径（否则「图里说还能押、文本说已封盘」比没有图更糟）。
+
+    `layout` 决定模板怎么排（2026-10-14 改版后没有右栏时间线了）：
+      · `rows`（列表/我的）—— 一场一行：队标 · 队名 · 封盘时间 · 状态，
+        行高由 flex:1 均分，把整张图填满；
+      · `fill`（规则/排行）—— 大字号行，字号按行数自适应，尽量填满版面。
+    `empty` 是**一行都没有时**居中的大字说明（空态也把版面撑满，不留半张白）。
     """
     before = _bet_close_before_s(es) // 60
     cmd_text = {"list": "@机器人 /bet", "mine": "@机器人 /bet 我的",
@@ -9091,31 +9222,31 @@ def build_bet_card_data(kind, items, bets, uid, now, es):
         "banner": ("V2 规则：今日总预告发布（09:30 登记）即开放下注 · "
                    "开赛前 %d 分钟封盘（各赛制一致）" % before),
         "cmd": cmd_text,
-        "head": "", "rows": [], "note": "", "cmdline": "",
-        "focus": None,
-        "win": {"w1": "可下注窗口 = 总预告发布 → 开赛前 %d 分钟" % before,
-                "w2": BET_CARD_WIN_W2},
+        "head": "", "rows": [], "note": "", "cmdline": "", "empty": "",
+        "layout": "rows" if kind in ("list", "mine") else "fill",
         "footerL": "数据取自服务器赛程状态（/bet 零网络查询）· 牌面与群内回复同源",
         "footerR": "生成于 %s · UTC+8" % now.strftime("%H:%M"),
     }
 
     if kind == "rules":
         data["head"] = "【CS2 竞猜规则】"
-        data["rows"] = [{"ix": "·",
+        data["rows"] = [{"rk": "",
                          "text": ln[2:] if ln.startswith("· ") else ln,
                          "hot": False}
                         for ln in bet_rules_text(es).split("\n")[1:]]
-        data["focus"] = _bet_focus(_bet_next_open_item(items, now), es, now, "下一场")
         return data
 
     if kind == "rank":
         data["head"] = "【CS2 竞猜】排行榜"
         rows = _bet_rank_rows(bets)
-        data["rows"] = [{"ix": str(i), "text": r["text"], "hot": r["hot"]}
+        data["rows"] = [{"rk": str(i), "text": r["text"], "nick": r["nick"],
+                         "pt": "%d 分" % r["pts"],
+                         "sub": "中 %d/%d" % (r["hits"], r["total"]),
+                         "hot": r["hot"]}
                         for i, r in enumerate(rows, 1)]
         if not rows:
             data["note"] = "还没有人猜中过 —— 下一场就是你。"
-        data["focus"] = _bet_focus(_bet_next_open_item(items, now), es, now, "下一场")
+            data["empty"] = "还没有人猜中过\n下一场就是你"
         return data
 
     if kind == "mine":
@@ -9123,25 +9254,16 @@ def build_bet_card_data(kind, items, bets, uid, now, es):
         data["head"] = "【CS2 竞猜】我的 · %d 分（中 %d/%d）" % (
             int(u.get("pts") or 0), int(u.get("hits") or 0), int(u.get("total") or 0))
         rows = _bet_mine_rows(items, bets, uid, now, es)
-        data["rows"] = [{"ix": "·", "text": r["text"], "hot": r["hot"]}
-                        for r in rows]
+        data["rows"] = [
+            {"ix": "·", "text": r["text"], "hot": r["hot"],
+             "a": r["a"], "b": r["b"], "la": r["la"], "lb": r["lb"],
+             "tm": r["tm"], "r1": r["res"],
+             "r2": ("你猜了 %s" % r["pick"]) if r["pick"] else "",
+             "chip": _BET_MINE_CHIP.get(r["kind"], ""), "ck": r["kind"]}
+            for r in rows]
         if not rows:
             data["note"] = "还没有押过注 —— /bet 看当前可下注的比赛"
-        # 焦点 = 你最早一笔还没结算的注（手里有牌时看它最有用）；没有就退「下一场」。
-        # ⚠️ round 的 teams 可能被 absorb_result 改写过 → `_bet_key(r)` 配不上 items，
-        #    所以直接用 round 自带的 teams/ts/bo 合成焦点（reg_ts 缺省 0 = 早已登记）。
-        unsettled = sorted(
-            (r for r in (bets.get("rounds") or {}).values()
-             if any(str(b.get("uid")) == uid for b in (r.get("bets") or []))
-             and not r.get("settled")),
-            key=lambda r: int(r.get("ts") or 0))
-        pend = ({"teams": list(unsettled[0].get("teams") or [])[:2],
-                 "ts": int(unsettled[0].get("ts") or 0),
-                 "bo": unsettled[0].get("bo") or "", "reg_ts": 0}
-                if unsettled else None)
-        data["focus"] = _bet_focus(
-            pend or _bet_next_open_item(items, now), es, now,
-            "你押的这场" if pend else "下一场")
+            data["empty"] = "还没有押过注\n/bet 看当前可下注的比赛"
         return data
 
     # kind == "list"
@@ -9152,6 +9274,7 @@ def build_bet_card_data(kind, items, bets, uid, now, es):
         nxt = _bet_next_open_item(items, now)
         if nxt is None:
             data["head"] = "【CS2 竞猜】接下来没有已预告的比赛"
+            data["empty"] = "接下来没有已预告的比赛\n今晚 09:30 总预告发布后开放下注"
         else:
             close = bet_close_ts(nxt, es)
             close_txt = ("%s 封盘" % _bet_hm(close, now)
@@ -9159,15 +9282,14 @@ def build_bet_card_data(kind, items, bets, uid, now, es):
             data["head"] = "【CS2 竞猜】当前没有开放下注的比赛"
             data["note"] = "下一场：%s（预计 %s 开赛，%s）" % (
                 _bet_pair(nxt), _bet_hm(nxt.get("ts"), now), close_txt)
-        data["focus"] = _bet_focus(nxt, es, now, "下一场")
+            data["empty"] = ("当前没有开放下注的比赛\n下一场 %s\n%s 开赛 · %s" % (
+                _bet_pair(nxt), _bet_hm(nxt.get("ts"), now), close_txt))
         return data
     shown = rows_vis[:limit]
     data["head"] = ("【CS2 竞猜】可下注 %d 场（总预告发布后开放，开赛前 %d 分钟封盘）"
                     % (len(live), before))
     data["rows"] = [
-        {"ix": _cn_idx(i),
-         "text": _bet_row_text(st, it, es, now, _bet_my_pick(bets, it, uid)),
-         "hot": st == "open"}
+        _bet_match_row(_cn_idx(i), st, it, es, now, _bet_my_pick(bets, it, uid))
         for i, (st, it) in enumerate(shown, 1)]
     ref_n = sum(1 for st, _ in shown if st not in ("open", "upcoming"))
     more_n = len(rows_vis) - len(shown)
@@ -9180,7 +9302,6 @@ def build_bet_card_data(kind, items, bets, uid, now, es):
     data["cmdline"] = "\n".join([
         "下注：/bet 1 A 或 /bet 1 B（A=①主队）",
         "我的：/bet 我的 · 排行：/bet 排行 · 规则：/bet 规则"])
-    data["focus"] = _bet_focus(shown[0][1], es, now, "列表第%s行" % _cn_idx(1))
     return data
 
 

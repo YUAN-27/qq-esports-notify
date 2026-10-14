@@ -13,8 +13,8 @@ body { background:#08090C; color:#F1F3F5;
   -webkit-font-smoothing:antialiased; font-variant-numeric:tabular-nums; }
 #app { width:100%; height:100%; display:flex; flex-direction:column; position:relative;
   background-image:
-    radial-gradient(1000px 760px at 16% 44%, rgba(0,214,107,.05), transparent 66%),
-    radial-gradient(1000px 760px at 84% 44%, rgba(0,214,107,.05), transparent 66%),
+    radial-gradient(1100px 820px at 20% 50%, rgba(0,214,107,.055), transparent 68%),
+    radial-gradient(1100px 820px at 80% 50%, rgba(0,214,107,.055), transparent 68%),
     linear-gradient(rgba(255,255,255,.016) 1px,transparent 1px),
     linear-gradient(90deg,rgba(255,255,255,.016) 1px,transparent 1px);
   background-size:auto,auto,48px 48px,48px 48px; }
@@ -24,8 +24,7 @@ body { background:#08090C; color:#F1F3F5;
 
 /* ---- 顶部：标题 + 日期/规则签 ---- */
 .hd { flex:none; height:96px; display:flex; align-items:center;
-  justify-content:space-between; padding:0 64px; border-bottom:1px solid #272D36;
-  position:relative; }
+  justify-content:space-between; padding:0 64px; border-bottom:1px solid #272D36; }
 .hd .l { display:flex; flex-direction:column; gap:6px; }
 .hd .t1 { font-family:"Bebas Neue"; font-size:46px; line-height:1; letter-spacing:3px; }
 .hd .t1 .g { color:#00D66B; }
@@ -42,54 +41,86 @@ body { background:#08090C; color:#F1F3F5;
 .bn .tx { font-size:17px; letter-spacing:1px; }
 .bn .tx b { color:#00D66B; font-weight:600; }
 
-.bd { flex:1; min-height:0; display:flex; gap:48px; padding:26px 64px 18px; }
-/* ---- 左：命令气泡 + 回复气泡（与群里逐字一致的内容）---- */
-.chat { flex:1.35; min-width:0; display:flex; flex-direction:column; }
-.chat .cap { font-size:13px; letter-spacing:3px; color:#7D8796; margin-bottom:12px; }
-.ubub { align-self:flex-end; max-width:70%; background:#00D66B; color:#06281A;
-  border-radius:14px 14px 4px 14px; padding:10px 18px; font-size:15px;
-  font-weight:600; letter-spacing:1px; margin-bottom:14px; }
-.bbub { align-self:flex-start; max-width:100%; background:#11151C;
-  border:1px solid #272D36; border-radius:4px 14px 14px 14px;
-  padding:18px 24px 16px; }
-.bhd { font-size:19px; font-weight:600; letter-spacing:1px; margin-bottom:12px; }
-.rw { display:flex; align-items:baseline; gap:12px; padding:7px 0;
-  border-bottom:1px dashed #1C222B; font-size:16px; letter-spacing:.5px; }
-.rw:last-of-type { border-bottom:none; }
-.rw .ix { flex:none; width:22px; color:#5C6570; font-size:18px; }
-.rw .tx { color:#9AA4B0; min-width:0; }
-.rw.hot .ix { color:#00D66B; }
-.rw.hot .tx { color:#F1F3F5; }
-.note { margin-top:10px; font-size:14px; color:#7D8796; letter-spacing:1px; }
-.cmd { margin-top:12px; font-size:14px; color:#00D66B; letter-spacing:1px; }
-/* ---- 右：v2 时间逻辑 ---- */
-.tl { flex:1; min-width:0; display:flex; flex-direction:column; }
-.tl .cap { font-size:13px; letter-spacing:3px; color:#7D8796; margin-bottom:12px; }
-.exti { font-size:15px; color:#C9D1D9; letter-spacing:1px; margin-bottom:20px; }
-.exti b { color:#F1F3F5; }
-.stages { display:flex; flex-direction:column; }
-.st { display:flex; align-items:flex-start; gap:18px; position:relative; padding-bottom:26px; }
-.st:last-child { padding-bottom:0; }
-.st .dot { flex:none; width:14px; height:14px; border-radius:50%; margin-top:5px;
-  background:#272D36; border:2px solid #3A4250; }
-.st.done .dot { background:#00D66B; border-color:#00D66B;
-  box-shadow:0 0 14px rgba(0,214,107,.55); }
-.st.next .dot { background:#FFB020; border-color:#FFB020;
-  box-shadow:0 0 14px rgba(255,176,32,.5); }
-.st:not(:last-child)::before { content:""; position:absolute; left:6px; top:19px;
-  bottom:0; width:2px; background:#272D36; }
-.st.done:not(:last-child)::before { background:rgba(0,214,107,.45); }
-.st .tm { flex:none; min-width:76px; font-family:"Bebas Neue"; font-size:26px;
-  letter-spacing:1px; line-height:1.1; color:#7D8796; white-space:nowrap; }
-.st.done .tm { color:#00D66B; }
-.st.next .tm { color:#FFB020; }
-.st .t1 { font-size:17px; font-weight:600; letter-spacing:1px; }
-.st .t2 { font-size:14px; color:#7D8796; letter-spacing:1px; margin-top:4px; }
-.nofocus { font-size:15px; color:#7D8796; letter-spacing:1px; margin-bottom:20px; }
-.win { margin-top:22px; border:1px solid rgba(0,214,107,.35); border-radius:12px;
-  background:rgba(0,214,107,.07); padding:16px 22px; }
-.win .w1 { font-size:16px; font-weight:600; color:#00D66B; letter-spacing:2px; }
-.win .w2 { font-size:14px; color:#9AA4B0; letter-spacing:1px; margin-top:6px; }
+/* ---- 主体：单栏，铺满 ---- */
+.bd { flex:1; min-height:0; display:flex; padding:24px 64px 22px; }
+.wrap { flex:1; min-width:0; display:flex; flex-direction:column;
+  background:#0B0E13; border:1px solid #262C35; border-radius:16px;
+  padding:22px 34px 18px; }
+.top { flex:none; display:flex; align-items:center; justify-content:space-between;
+  gap:28px; padding-bottom:16px; border-bottom:1px solid #1E242D; }
+.bhd { font-size:34px; font-weight:600; letter-spacing:1px; line-height:1.25; min-width:0; }
+.ubub { flex:none; background:#00D66B; color:#06281A; border-radius:12px 12px 3px 12px;
+  padding:9px 18px; font-size:17px; font-weight:600; letter-spacing:1px; white-space:nowrap; }
+
+/* ---- rows 模式：一场一行，行高均分铺满 ---- */
+#rows { flex:1; min-height:0; display:flex; flex-direction:column; margin-top:6px; }
+.mrw { flex:1; min-height:0; display:grid; align-items:center;
+  grid-template-columns:54px 128px minmax(0,1fr) 76px minmax(0,1fr) 216px 156px;
+  gap:20px; border-bottom:1px dashed #1C222B; padding:2px 0; }
+.mrw:last-child { border-bottom:none; }
+.mrw .ix { font-size:var(--nm,34px); color:#5C6570; }
+.mrw .tm { font-family:"Bebas Neue"; font-size:var(--tm,30px); letter-spacing:1px;
+  color:#7D8796; white-space:nowrap; }
+.mrw .ta { display:flex; align-items:center; gap:16px; justify-content:flex-end; min-width:0; }
+.mrw .tb { display:flex; align-items:center; gap:16px; min-width:0; }
+.mrw .nm { font-size:var(--nm,34px); font-weight:600; letter-spacing:.5px;
+  white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+.mrw .vs { font-family:"Bebas Neue"; font-size:var(--vs,26px); letter-spacing:2px;
+  color:#4C555F; text-align:center; }
+.mrw .lg { flex:none; width:var(--lg,66px); height:var(--lg,66px); border-radius:10px;
+  object-fit:contain; }
+.mrw .lg.ph { display:flex; align-items:center; justify-content:center;
+  background:#171C24; border:1px solid #2B323C; color:#6B7480;
+  font-size:calc(var(--lg,66px) * .3); font-weight:600; letter-spacing:0; }
+.mrw .rt { display:flex; flex-direction:column; align-items:flex-end; gap:5px;
+  min-width:0; }
+.mrw .rt b { font-size:var(--r1,22px); font-weight:600; letter-spacing:1px;
+  color:#C9D1D9; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;
+  max-width:100%; }
+.mrw .rt i { font-style:normal; font-size:var(--r2,18px); letter-spacing:1px;
+  color:#6B7480; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;
+  max-width:100%; }
+.mrw .chip { font-size:var(--cp,20px); font-weight:600; letter-spacing:1px;
+  text-align:center; padding:9px 6px; border-radius:10px; border:1px solid #2B323C;
+  color:#7D8796; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+.mrw.hot .ix { color:#00D66B; }
+.mrw.hot .nm { color:#F1F3F5; }
+.mrw.hot .chip { color:#06281A; background:#00D66B; border-color:#00D66B; }
+.mrw.hot .rt b { color:#F1F3F5; }
+.mrw .chip.hit { color:#06281A; background:#00D66B; border-color:#00D66B; }
+.mrw .chip.miss { color:#FF8A8A; border-color:rgba(255,92,92,.5); background:rgba(255,92,92,.08); }
+.mrw .chip.void { color:#FFB020; border-color:rgba(255,176,32,.5); background:rgba(255,176,32,.08); }
+.mrw .chip.off { color:#7D8796; }
+
+/* ---- fill 模式：规则/排行，大字填满整版 ---- */
+#rows.fill { justify-content:space-between; }
+.frw { flex:1; min-height:0; display:grid; align-items:center; gap:26px;
+  grid-template-columns:76px minmax(0,1fr) auto;
+  font-size:var(--fs,52px); border-bottom:1px dashed #1C222B; }
+.frw:last-child { border-bottom:none; }
+.frw .rk { font-family:"Bebas Neue"; font-size:calc(var(--fs,52px) * 1.05);
+  letter-spacing:2px; color:#5C6570; }
+.frw .tx { font-weight:600; letter-spacing:1px; line-height:1.3; min-width:0; }
+.frw .rt { display:flex; align-items:baseline; gap:18px; white-space:nowrap; }
+.frw .rt b { font-family:"Bebas Neue"; font-size:calc(var(--fs,52px) * 1.15);
+  letter-spacing:2px; color:#F1F3F5; }
+.frw .rt i { font-style:normal; font-size:calc(var(--fs,52px) * .5);
+  letter-spacing:1px; color:#7D8796; }
+.frw .bul { width:calc(var(--fs,52px) * .34); height:calc(var(--fs,52px) * .34);
+  border-radius:50%; background:#00D66B; }
+.frw.hot .rk { color:#00D66B; }
+.frw.hot .rt b { color:#00D66B; }
+
+/* ---- 空态：撑满剩余空间居中 ---- */
+#rows.emptywrap { display:flex; align-items:center; justify-content:center; }
+.empty { font-size:62px; line-height:1.7; letter-spacing:4px; color:#7D8796;
+  text-align:center; font-weight:600; }
+
+/* ---- 尾部说明 ---- */
+.bot { flex:none; padding-top:14px; border-top:1px solid #1E242D; margin-top:10px; }
+.note { font-size:18px; color:#7D8796; letter-spacing:1px; line-height:1.6; }
+.cmd { margin-top:8px; font-size:18px; color:#00D66B; letter-spacing:1px;
+  line-height:1.6; }
 
 /* ---- 页脚 ---- */
 .ftr { flex:none; height:46px; display:flex; align-items:center;
@@ -113,24 +144,15 @@ body { background:#08090C; color:#F1F3F5;
   </div>
   <div class="bn"><div class="bar"></div><div class="tx" id="banner"></div></div>
   <div class="bd">
-    <div class="chat">
-      <div class="cap">群里发送 @机器人 /bet → 机器人回复（内容与纯文本回复逐字一致）</div>
-      <div class="ubub" id="cmd"></div>
-      <div class="bbub">
+    <div class="wrap">
+      <div class="top">
         <div class="bhd" id="head"></div>
-        <div id="rows"></div>
+        <div class="ubub" id="cmd"></div>
+      </div>
+      <div id="rows"></div>
+      <div class="bot" id="bot" style="display:none">
         <div class="note" id="note" style="display:none"></div>
         <div class="cmd" id="cmdline" style="display:none"></div>
-      </div>
-    </div>
-    <div class="tl">
-      <div class="cap">时间逻辑：总预告发布 → 开放 → 封盘 → 开赛 → 结算</div>
-      <div class="exti" id="example" style="display:none"></div>
-      <div class="nofocus" id="nofocus" style="display:none"></div>
-      <div class="stages" id="stages"></div>
-      <div class="win" id="win" style="display:none">
-        <div class="w1" id="w1"></div>
-        <div class="w2" id="w2"></div>
       </div>
     </div>
   </div>
@@ -138,7 +160,7 @@ body { background:#08090C; color:#F1F3F5;
 </div>
 <script>
 const b = __BET__;
-function esc(s){ return String(s??"").replace(/&/g,"&amp;").replace(/</g,"&lt;"); }
+function esc(s){ return String(s??"").replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/"/g,"&quot;"); }
 const $ = id => document.getElementById(id);
 
 /* 顶部 */
@@ -147,33 +169,82 @@ $("date").textContent = esc(b.date || "");
 $("ruletag").innerHTML = esc(b.ruleTag || "").replace("V2", "<b>V2</b>");
 $("banner").innerHTML = esc(b.banner || "").replace(/（([^）]*)）/g, "（<b>$1</b>");
 
-/* 左：命令气泡 + 回复气泡 */
-$("cmd").textContent = esc(b.cmd || "");
 $("head").textContent = esc(b.head || "");
-$("rows").innerHTML = (b.rows || []).map(r =>
-  `<div class="rw${r.hot ? " hot" : ""}"><span class="ix">${esc(r.ix)}</span>` +
-  `<span class="tx">${esc(r.text)}</span></div>`).join("");
-if (b.note){ $("note").style.display = ""; $("note").textContent = esc(b.note); }
-if (b.cmdline){ $("cmdline").style.display = ""; $("cmdline").textContent = esc(b.cmdline); }
+$("cmd").textContent = esc(b.cmd || "");
 
-/* 右：时间逻辑（focus 为空时只说明「当前没有开放中的比赛」）*/
-const f = b.focus;
-if (f && f.stages && f.stages.length){
-  if (f.example){ $("example").style.display = ""; $("example").innerHTML = esc(f.example); }
-  $("stages").innerHTML = f.stages.map(s =>
-    `<div class="st ${esc(s.state || "todo")}"><div class="dot"></div>` +
-    `<div class="tm">${esc(s.time || "")}</div>` +
-    `<div><div class="t1">${esc(s.title || "")}</div>` +
-    `<div class="t2">${esc(s.sub || "")}</div></div></div>`).join("");
-} else {
-  $("nofocus").style.display = "";
-  $("nofocus").textContent = esc((f && f.example) ||
-    "当前没有开放中的比赛 —— 下一场总预告发布后即可下注");
+/* 行：layout=rows → 一场一行（队标 / 队名 / 封盘时间）；layout=fill → 大字填满 */
+const rows = $("rows");
+const list = b.rows || [];
+const layout = b.layout === "fill" ? "fill" : "rows";
+
+function logo(u, nm){
+  if (u) return `<img class="lg" src="${esc(u)}" alt="">`;
+  return `<span class="lg ph">${esc(String(nm || "?").slice(0, 3))}</span>`;
 }
-if (b.win){
-  $("win").style.display = "";
-  $("w1").textContent = esc(b.win.w1 || "");
-  $("w2").textContent = esc(b.win.w2 || "");
+
+if (list.length){
+  rows.classList.add(layout);
+  if (layout === "fill"){
+    /* 字号自适应（用户 2026-10-14：放大字号、尽量填充整个版面）。
+       两个上限取小，再夹到 30~96px：
+         · byRow   —— 一屏要放下 n 行，行高决定字号上限；
+         · byWidth —— 最长那行得**单行放下**（折行会让规则读起来断断续续）。
+       字宽按「全角 1 / 半角 0.62」估算（IBM Plex Mono 的数字/拉丁 ≈ 0.6em），
+       再留 6% 余量兜字体回退带来的偏差。 */
+    const n = list.length;
+    const hasPt = list.some(r => r.pt !== undefined && r.pt !== null && r.pt !== "");
+    const wide = ch => {
+      const c = ch.codePointAt(0);
+      /* 中日韩统一表意 + 全角标点 + 常见「看着是符号其实是全角」的字（· → ← — …） */
+      return (c >= 0x2e80 || c === 0xb7 || (c >= 0x2010 && c <= 0x2bff)) ? 1 : 0.62;
+    };
+    const measure = s => { let w = 0; for (const ch of String(s || "")) w += wide(ch); return w; };
+    const longest = Math.max(1, ...list.map(r => measure(r.nick || r.text))) * 1.06;
+    const byWidth = Math.floor((1596 - (hasPt ? 600 : 0)) / longest);
+    const byRow = Math.floor((728 / n) * 0.62);
+    const fs = Math.max(30, Math.min(96, byWidth, byRow));
+    rows.style.setProperty("--fs", fs + "px");
+    rows.innerHTML = list.map(r =>
+      `<div class="frw${r.hot ? " hot" : ""}">` +
+        (r.rk === "" ? `<div class="bul"></div>` : `<div class="rk">${esc(r.rk)}</div>`) +
+        `<div class="tx">${esc(r.nick || r.text)}</div>` +
+        (r.pt === undefined || r.pt === null || r.pt === ""
+          ? `<div class="rt"></div>`
+          : `<div class="rt"><b>${esc(r.pt)}</b><i>${esc(r.sub || "")}</i></div>`) +
+      `</div>`).join("");
+  } else {
+    /* 行高由 flex:1 均分；字号/队标随行数分档 —— 行少就放大，同样为了填满版面 */
+    const n = list.length;
+    const s = n <= 3
+      ? {lg:96, nm:44, tm:38, vs:32, r1:28, r2:23, cp:26}
+      : n <= 6
+      ? {lg:66, nm:34, tm:30, vs:26, r1:22, r2:18, cp:20}
+      : n <= 9
+      ? {lg:52, nm:27, tm:23, vs:21, r1:18, r2:16, cp:17}
+      : {lg:42, nm:23, tm:19, vs:18, r1:16, r2:14, cp:15};
+    for (const k in s) rows.style.setProperty("--" + k, s[k] + "px");
+    rows.innerHTML = list.map(r =>
+      `<div class="mrw${r.hot ? " hot" : ""}">` +
+        `<span class="ix">${esc(r.ix || "")}</span>` +
+        `<span class="tm">${esc(r.tm || "")}</span>` +
+        `<span class="ta">${logo(r.la, r.a)}<span class="nm">${esc(r.a || "")}</span></span>` +
+        `<span class="vs">VS</span>` +
+        `<span class="tb"><span class="nm">${esc(r.b || "")}</span>${logo(r.lb, r.b)}</span>` +
+        `<span class="rt"><b>${esc(r.r1 || "")}</b>` +
+          (r.r2 ? `<i>${esc(r.r2)}</i>` : "") + `</span>` +
+        `<span class="chip ${esc(r.ck || "")}">${esc(r.chip || "")}</span>` +
+      `</div>`).join("");
+  }
+} else if (b.empty){
+  rows.classList.add("emptywrap");
+  rows.innerHTML = `<div class="empty">${esc(b.empty)}</div>`;
+}
+
+/* 空态时不再重复底部说明（大字块已经把话说完了） */
+const bot = $("bot");
+if (list.length){
+  if (b.note){ $("note").style.display = ""; $("note").textContent = esc(b.note); bot.style.display = ""; }
+  if (b.cmdline){ $("cmdline").style.display = ""; $("cmdline").textContent = esc(b.cmdline); bot.style.display = ""; }
 }
 
 /* 页脚 */
